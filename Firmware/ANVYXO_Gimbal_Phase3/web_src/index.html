@@ -1,0 +1,338 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ANVYXO Gimbal</title>
+<style>
+:root{--bg:#0f1115;--card:#1a1d24;--card2:#222631;--line:#2d3240;--fg:#e8eaed;--mut:#9aa0a6;--acc:#ff8a1f;--ok:#2ecc71;--bad:#e74c3c;--warn:#f1c40f}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px system-ui,Segoe UI,Arial,sans-serif}
+header{display:flex;gap:12px;justify-content:space-between;align-items:center;padding:10px 16px;background:var(--card);position:sticky;top:0;z-index:5}
+h1{font-size:18px;margin:0;letter-spacing:3px}#st{font-size:12px;color:var(--mut);text-align:right}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--bad);margin-right:6px;vertical-align:middle}.dot.on{background:var(--ok)}
+main{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;padding:12px;max-width:1280px;margin:auto}
+@media(min-width:980px){main{grid-template-columns:minmax(0,1.15fr) minmax(0,1fr)}}
+.col{display:flex;flex-direction:column;gap:12px;min-width:0}
+.card{background:var(--card);border-radius:12px;padding:12px;min-width:0}
+.card h2{font-size:13px;letter-spacing:1px;text-transform:uppercase;color:var(--mut);margin:0 0 8px;display:flex;justify-content:space-between;align-items:center}
+.vid{position:relative;background:#000;border-radius:8px;overflow:hidden;aspect-ratio:4/3}
+#cam{width:100%;height:100%;object-fit:contain;display:block}
+.ovl{position:absolute;left:8px;top:8px;font-size:12px;background:#000a;padding:3px 7px;border-radius:6px}
+#camerr{position:absolute;inset:0;display:none;align-items:center;justify-content:center;color:var(--mut);text-align:center;padding:20px}
+#twin{width:100%;aspect-ratio:4/3;display:block;border-radius:8px;background:radial-gradient(circle at 50% 35%,#252a36,#12151b);touch-action:none;cursor:grab}
+#pad{width:100%;aspect-ratio:2/1;background:#11141a;border:1px solid var(--line);border-radius:10px;touch-action:none;display:block}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+button{flex:1;min-width:64px;padding:9px 8px;border:0;border-radius:8px;background:#2a2f3a;color:var(--fg);font-size:13px;cursor:pointer}
+button:hover{background:#343a47}button.on{background:var(--acc);color:#000}button.laser.on{background:var(--bad);color:#fff}
+button.sm{flex:0 0 auto;padding:6px 12px;min-width:0}button.pass.on{background:var(--ok);color:#000}button.fail.on{background:var(--bad);color:#fff}
+label{font-size:12px;color:var(--mut);display:block;margin-top:10px}label b{color:var(--fg);font-weight:600}
+input[type=range]{width:100%;accent-color:var(--acc)}select,input[type=text]{width:100%;background:#11141a;color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:8px}
+.kv{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));font-size:12px;gap:4px 10px;margin-top:8px;color:var(--mut)}
+.kv b{color:var(--acc);font-weight:600}
+small,.hint{color:var(--mut);font-size:12px}.hint{margin:6px 0 0;line-height:1.45}
+.tabs{display:flex;gap:4px;margin:-4px 0 10px;border-bottom:1px solid var(--line)}
+.tabs button{flex:1;background:none;border-radius:8px 8px 0 0;color:var(--mut);padding:10px 4px}.tabs button.on{background:var(--card2);color:var(--fg)}
+.pane{display:none}.pane.on{display:block}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
+.tg{display:flex;align-items:center;gap:8px;font-size:13px;margin-top:8px;color:var(--fg)}.tg input{accent-color:var(--acc);width:16px;height:16px}
+.test{background:var(--card2);border-radius:10px;padding:10px 12px;margin-top:10px}
+.test h3{margin:0;font-size:14px;display:flex;align-items:center;gap:8px}.test h3 .pin{margin-left:auto;font-size:11px;color:var(--mut);font-weight:400}
+.badge{font-size:11px;padding:2px 7px;border-radius:10px;background:#333;color:var(--mut)}.badge.ok{background:#1d4d33;color:#7ff0a8}.badge.bad{background:#5a2020;color:#ff9a9a}.badge.warn{background:#5a4a10;color:#ffe27a}
+#log{height:130px;overflow:auto;background:#0b0d11;border-radius:8px;padding:8px;font:12px ui-monospace,Consolas,monospace;color:#b8c0cc;margin-top:8px;white-space:pre-wrap}
+.legend{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--mut);margin-top:6px}.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:middle}
+</style></head><body>
+<header><h1>ANVYXO</h1><span id="st"><span class="dot" id="dot"></span><span id="stt">connecting...</span></span></header>
+<main>
+<div class="col">
+ <div class="card">
+  <h2>Camera <span><button class="sm" onclick="snap()">Snapshot</button> <button class="sm" onclick="full()">Full screen</button></span></h2>
+  <div class="vid" id="vid"><img id="cam" alt="camera" crossorigin="anonymous"><div class="ovl" id="ovl">-</div><div id="camerr"></div></div>
+  <div class="row"><button data-p="FAST" onclick="camPreset('FAST')">Fast 320</button><button data-p="BAL" onclick="camPreset('BAL')">Balanced 640</button>
+   <button data-p="HQ" onclick="camPreset('HQ')">Sharp 800</button><button data-p="MAX" onclick="camPreset('MAX')">Max 1600</button></div>
+ </div>
+ <div class="card">
+  <h2>3D twin (from the CAD) <span><button class="sm" onclick="resetView()">Reset view</button></span></h2>
+  <canvas id="twin"></canvas>
+  <div class="legend"><span>Drag = orbit, wheel / pinch = zoom.</span><span><i style="background:#ff8a1f"></i>camera aim</span><span><i style="background:#e74c3c"></i>laser</span><span><i style="background:#5dade2"></i>target</span></div>
+  <label class="tg"><input type="checkbox" id="prev" onchange="preview(this.checked)"> Preview only: sliders move the 3D twin, not the real gimbal</label>
+ </div>
+</div>
+
+<div class="col"><div class="card">
+ <div class="tabs"><button data-t="ctl" class="on">Control</button><button data-t="cal">Calibrate</button><button data-t="camt">Camera</button><button data-t="test">Wiring test</button><button data-t="scr">Screen</button></div>
+
+ <!-- ================= CONTROL ================= -->
+ <div class="pane on" id="ctl">
+  <canvas id="pad"></canvas><small>Drag / tap the pad to aim. Keys: arrows, space = laser, C = centre.</small>
+  <label>Pan only <b id="pv">0</b>&deg; <small>(MG996R)</small></label><input id="ps" type="range" min="-90" max="90" step="1" value="0">
+  <label>Tilt only <b id="tv2">0</b>&deg; <small>(MG90S)</small></label><input id="ts" type="range" min="-45" max="45" step="1" value="0">
+  <div class="row"><button onclick="send('C')">Centre</button><button id="bl" class="laser" onclick="send('L:T')">Laser</button></div>
+  <div class="row"><button id="m_PATROL" onclick="mode('PATROL')">Patrol</button><button id="m_SCAN" onclick="mode('SCAN')">Scan</button>
+   <button onclick="send('MODE:NOD')">Nod</button><button onclick="send('MODE:SHAKE')">Shake</button><button onclick="send('MODE:MANUAL')">Stop</button></div>
+  <label>Presets (tap = go, hold = save here)</label><div class="row" id="pr"></div>
+  <label>Speed <b id="sv"></b> &deg;/s</label><input id="sp" type="range" min="10" max="360" step="10" oninput="send('SPD:'+this.value)">
+  <label>Calibration <b id="trv"></b> <small>(zero, direction and limits: Calibrate tab)</small></label>
+  <div class="kv"><span>Pan <b id="vp">0</b>&deg;</span><span>Tilt <b id="vt">0</b>&deg;</span><span>Mode <b id="vm">-</b></span><span>Pulse <b id="vus">-</b></span></div>
+ </div>
+
+ <!-- ================= CAMERA ================= -->
+ <div class="pane" id="camt">
+  <div class="kv"><span>Sensor <b id="csn">-</b></span><span>Stream <b id="cfp">0</b> fps</span><span>Frame <b id="ckb">0</b> KB</span><span>Viewers <b id="cvw">0</b></span></div>
+  <label>Resolution</label><select data-k="res">
+   <option value="0">320 x 240 (QVGA)</option><option value="1">400 x 296 (CIF)</option><option value="2">480 x 320 (HVGA)</option>
+   <option value="3">640 x 480 (VGA)</option><option value="4">800 x 600 (SVGA)</option><option value="5">1024 x 768 (XGA)</option>
+   <option value="6">1280 x 720 (HD)</option><option value="7">1280 x 1024 (SXGA)</option><option value="8">1600 x 1200 (UXGA)</option></select>
+  <div class="grid2">
+   <div><label>JPEG quality <b data-v="q"></b> <small>lower = sharper</small></label><input type="range" data-k="q" min="6" max="40"></div>
+   <div><label>Max frame rate <b data-v="fps"></b> fps</label><input type="range" data-k="fps" min="1" max="30"></div>
+   <div><label>Brightness <b data-v="bri"></b></label><input type="range" data-k="bri" min="-2" max="2"></div>
+   <div><label>Contrast <b data-v="con"></b></label><input type="range" data-k="con" min="-2" max="2"></div>
+   <div><label>Saturation <b data-v="sat"></b></label><input type="range" data-k="sat" min="-2" max="2"></div>
+   <div><label>Exposure level <b data-v="ael"></b></label><input type="range" data-k="ael" min="-5" max="5"></div>
+   <div><label>Manual exposure <b data-v="aecv"></b> <small>(auto off)</small></label><input type="range" data-k="aecv" min="0" max="1200"></div>
+   <div><label>Manual gain <b data-v="agcg"></b> <small>(auto off)</small></label><input type="range" data-k="agcg" min="0" max="30"></div>
+   <div><label>Gain ceiling</label><select data-k="gc"><option value="0">2x</option><option value="1">4x</option><option value="2">8x</option><option value="3">16x</option><option value="4">32x</option><option value="5">64x</option><option value="6">128x</option></select></div>
+   <div><label>White balance</label><select data-k="wbm"><option value="0">Auto</option><option value="1">Sunny</option><option value="2">Cloudy</option><option value="3">Office</option><option value="4">Home</option></select></div>
+   <div><label>Effect</label><select data-k="sfx"><option value="0">None</option><option value="1">Negative</option><option value="2">Greyscale</option><option value="3">Red tint</option><option value="4">Green tint</option><option value="5">Blue tint</option><option value="6">Sepia</option></select></div>
+  </div>
+  <div class="grid2">
+   <label class="tg"><input type="checkbox" data-k="aec">Auto exposure</label><label class="tg"><input type="checkbox" data-k="aec2">Low-light (DSP) exposure</label>
+   <label class="tg"><input type="checkbox" data-k="agc">Auto gain</label><label class="tg"><input type="checkbox" data-k="awb">Auto white balance</label>
+   <label class="tg"><input type="checkbox" data-k="awbg">AWB gain</label><label class="tg"><input type="checkbox" data-k="lenc">Lens correction</label>
+   <label class="tg"><input type="checkbox" data-k="bpc">Black pixel fix</label><label class="tg"><input type="checkbox" data-k="wpc">White pixel fix</label>
+   <label class="tg"><input type="checkbox" data-k="gma">Raw gamma</label><label class="tg"><input type="checkbox" data-k="dcw">Downsize (DCW)</label>
+   <label class="tg"><input type="checkbox" data-k="vflip">Flip vertical</label><label class="tg"><input type="checkbox" data-k="hm">Mirror</label>
+  </div>
+  <div class="row"><button onclick="send('CAMSAVE')">Save as default</button><button onclick="send('CAMRESET')">Factory reset</button></div>
+  <p class="hint">Smoothest: Fast or Balanced. Sharpest: Sharp 800 with quality 8-10. Wi-Fi is usually the limit: look at the frame KB &times; fps. Too bright / washed out: lower <i>Exposure level</i> (-2 to -4) and keep the gain ceiling at 8x. In a dim room turn on <i>Low-light exposure</i> and raise the gain ceiling. Settings apply live; <b>Save as default</b> keeps them after a restart.</p>
+ </div>
+
+ <!-- ================= CALIBRATE ================= -->
+ <div class="pane" id="cal">
+  <p class="hint" style="margin-top:0">Do this once after building, <b>before tracking</b>. Each button saves to the gimbal straight away; the head never jumps.
+   Status: <b id="calst">-</b></p>
+  <div class="row"><button id="calon" onclick="send('CAL:'+(S.calOn?'OFF':'ON'))">1. Start calibration</button>
+   <button class="sm" onclick="if(confirmBox('Forget zero, direction and limits?'))send('CAL:RESET')">Reset</button></div>
+  <div class="test"><h3>2. Pan zero <span class="pin">camera points straight ahead</span></h3>
+   <div class="row" data-jog="P"></div>
+   <div class="row"><button onclick="send('CAL:ZP')">Set pan zero here</button><button id="invP" onclick="send('CAL:IP')">Flip pan direction</button></div>
+   <p class="hint">Seen from behind, <b>+</b> must turn the camera right. If it goes left, press Flip.</p></div>
+  <div class="test"><h3>3. Tilt zero <span class="pin">camera level (phone spirit level on the head)</span></h3>
+   <div class="row" data-jog="T"></div>
+   <div class="row"><button onclick="send('CAL:ZT')">Set tilt zero here</button><button id="invT" onclick="send('CAL:IT')">Flip tilt direction</button></div>
+   <p class="hint"><b>+</b> must raise the camera. If it looks down, press Flip.</p></div>
+  <div class="test"><h3>4. Limits <span class="pin" id="limv"></span></h3>
+   <p class="hint">Jog slowly to each end with the buttons above. Stop just <b>before</b> anything rubs or a cable pulls, then set that end.</p>
+   <div class="row"><button onclick="send('CAL:LP-')">Left end here</button><button onclick="send('CAL:LP+')">Right end here</button></div>
+   <div class="row"><button onclick="send('CAL:LT-')">Down end here</button><button onclick="send('CAL:LT+')">Up end here</button></div></div>
+  <div class="row"><button onclick="send('CAL:DONE');send('C')">5. Finish and go to centre</button></div>
+  <div class="kv"><span>Pan <b id="cpan">0</b>&deg;</span><span>Tilt <b id="ctilt">0</b>&deg;</span><span>Trim <b id="ctrim">-</b></span><span>Pulse <b id="cus">-</b></span></div>
+ </div>
+
+ <!-- ================= WIRING TEST ================= -->
+ <div class="pane" id="test">
+  <p class="hint" style="margin-top:0">Test one part at a time. Watch the real gimbal <b>and</b> the 3D twin: they should move the same way. Mark each step; your marks are kept in this browser.</p>
+
+  <div class="test" data-test="power"><h3>1. Power &amp; board <span class="badge" id="b_power">-</span><span class="pin">5 V 3 A adapter, common GND</span></h3>
+   <div class="kv"><span>Last reset <b id="d_reset">-</b></span><span>Up <b id="d_up">-</b></span><span>Heap <b id="d_heap">-</b></span><span>PSRAM <b id="d_psram">-</b></span><span>Chip <b id="d_temp">-</b></span><span>Wi-Fi <b id="d_rssi">-</b></span><span>Firmware <b id="d_fw">-</b></span></div>
+   <div class="row"><button onclick="send('DIAG')">Refresh</button><button onclick="if(confirmBox('Restart the ESP32?'))send('REBOOT')">Restart board</button></div>
+   <p class="hint"><b>BROWNOUT</b> as the last reset = the 5 V supply dips when the servos move: use a 3 A adapter, the 470-1000 &micro;F cap at the base, and thick 5 V/GND wires. Wi-Fi below -75 dBm makes the video stutter.</p>
+   <div class="row"><button class="pass sm">Pass</button><button class="fail sm">Fail</button></div></div>
+
+  <div class="test" data-test="oled"><h3>2. OLED screen <span class="badge" id="b_oled">-</span><span class="pin">SDA 21, SCL 47, VCC 3V3</span></h3>
+   <div class="kv"><span>I2C bus sees <b id="d_i2c">-</b></span></div>
+   <div class="row"><button onclick="send('OLEDINIT')">Re-check wiring</button><button onclick="send('OLEDTEST:1')">All white</button><button onclick="send('OLEDTEST:2')">Checker</button><button onclick="send('OLEDTEST:3')">Grid</button><button onclick="send('OLEDTEST:0')">Normal</button></div>
+   <p class="hint">Expect <b>0x3C</b>. "none" = SDA/SCL swapped, loose, or no 3V3/GND. Re-plug the leads, then press <i>Re-check wiring</i> (no restart needed). All white with dead lines or blocks = a damaged panel.</p>
+   <div class="row"><button class="pass sm">Pass</button><button class="fail sm">Fail</button></div></div>
+
+  <div class="test" data-test="pan"><h3>3. Pan servo (MG996R) <span class="badge" id="b_pan">-</span><span class="pin">signal GPIO 14, red 5 V adapter</span></h3>
+   <div class="kv"><span>Signal <b id="d_panEn">-</b></span><span>Pulse <b id="d_panUs">-</b> &micro;s</span><span>Angle <b id="d_pan">-</b>&deg;</span></div>
+   <div class="row"><button onclick="send('MODE:TESTPAN')">Sweep -90 &rarr; +90 &rarr; 0</button><button onclick="send('MV:-10,0')">&larr; 10&deg;</button><button onclick="send('MV:10,0')">10&deg; &rarr;</button><button onclick="send('PT:0,'+(S.tt||0))">Centre</button></div>
+   <div class="row"><button id="srvP" onclick="send('SRV:P,'+(S.panEn?0:1))">Signal off (go limp)</button></div>
+   <p class="hint">"&rarr;" should turn the camera to <b>its</b> right, the same as the twin. Wrong way: set <code>PAN_INVERT 1</code>. Twitches but won't hold: no common GND or a weak supply. Nothing at all: signal lead on the wrong pin. <i>Signal off</i> should make it go limp; if it still holds, the wire isn't on GPIO 14.</p>
+   <div class="row"><button class="pass sm">Pass</button><button class="fail sm">Fail</button></div></div>
+
+  <div class="test" data-test="tilt"><h3>4. Tilt servo (MG90S) <span class="badge" id="b_tilt">-</span><span class="pin">signal GPIO 2, red 5 V harness</span></h3>
+   <div class="kv"><span>Signal <b id="d_tiltEn">-</b></span><span>Pulse <b id="d_tiltUs">-</b> &micro;s</span><span>Angle <b id="d_tilt">-</b>&deg;</span></div>
+   <div class="row"><button onclick="send('MODE:TESTTILT')">Sweep -45 &rarr; +45 &rarr; 0</button><button onclick="send('MV:0,10')">Up 10&deg;</button><button onclick="send('MV:0,-10')">Down 10&deg;</button><button onclick="send('PT:'+(S.tp||0)+',0')">Level</button></div>
+   <div class="row"><button id="srvT" onclick="send('SRV:T,'+(S.tiltEn?0:1))">Signal off (go limp)</button></div>
+   <p class="hint">"Up" should raise the camera, the same as the twin. Wrong way: set <code>TILT_INVERT 1</code>. If the head rubs the yoke at &plusmn;45&deg;, adjust the trim on the Control tab.</p>
+   <div class="row"><button class="pass sm">Pass</button><button class="fail sm">Fail</button></div></div>
+
+  <div class="test" data-test="laser"><h3>5. Laser <span class="badge" id="b_laser">-</span><span class="pin">NPN base via 1 k&Omega; on GPIO 1</span></h3>
+   <div class="row"><button onclick="laserPulse()">Pulse 1 s</button><button onclick="send('L:T')">Toggle</button></div>
+   <p class="hint">Point it at a wall first. No light: check the transistor's C/B/E order (S8050 and 2N2222 pinouts differ) and that laser + goes to 5 V. Always on: collector and emitter are swapped. It switches itself off after 60 s.</p>
+   <div class="row"><button class="pass sm">Pass</button><button class="fail sm">Fail</button></div></div>
+
+  <div class="test" data-test="cam"><h3>6. Camera <span class="badge" id="b_cam">-</span><span class="pin">built in (camera ribbon)</span></h3>
+   <div class="kv"><span>Sensor <b id="d_sensor">-</b></span><span>Stream <b id="d_fps">-</b> fps</span></div>
+   <p class="hint">No sensor = the ribbon isn't fully latched. Picture upside down or mirrored: use Flip/Mirror on the Camera tab.</p>
+   <div class="row"><button class="pass sm">Pass</button><button class="fail sm">Fail</button></div></div>
+
+  <div class="test" data-test="led"><h3>7. Status LED <span class="pin">on-board RGB, GPIO 48</span></h3>
+   <div class="row"><button onclick="send('LED:60,0,0')" style="color:#ff7b7b">Red</button><button onclick="send('LED:0,60,0')" style="color:#7bff9c">Green</button><button onclick="send('LED:0,0,60')" style="color:#7bb5ff">Blue</button></div>
+   <p class="hint">Normal colours: blue = ready, green = someone viewing, red = laser on, amber = no network.</p>
+   <div class="row"><button class="pass sm">Pass</button><button class="fail sm">Fail</button></div></div>
+
+  <label>Command console <small>(type HELP)</small></label>
+  <div id="log"></div>
+  <div class="row"><input type="text" id="cmd" placeholder="e.g. PT:30,10" style="flex:1" onkeydown="if(event.key=='Enter'){send(this.value,1);this.value=''}"><button class="sm" onclick="resetMarks()">Clear marks</button></div>
+ </div>
+
+ <!-- ================= SCREEN ================= -->
+ <div class="pane" id="scr">
+  <label>Page</label>
+  <div class="row"><button data-pg="STATUS" onclick="send('OLED:0')">Status</button><button data-pg="GIMBAL" onclick="send('OLED:1')">Gimbal</button><button data-pg="EYES" onclick="send('OLED:2')">Eyes</button><button data-pg="TEXT" onclick="send('OLED:3')">Text</button></div>
+  <label>Show text <small>( | = new line, up to 4 lines)</small></label>
+  <div class="row"><input type="text" id="otxt" maxlength="80" value="HELLO|ANVYXO" style="flex:1" onkeydown="if(event.key=='Enter')sendText()"><button class="sm" onclick="sendText()">Show</button></div>
+  <label>Brightness <b id="ocv"></b></label><input type="range" id="oc" min="0" max="255" step="5" oninput="send('OLEDC:'+this.value);$('ocv').textContent=this.value">
+  <div class="row"><button id="oinv" onclick="send('OLEDINV:'+(D.oledInv?0:1));setTimeout(()=>send('DIAG'),200)">Invert</button>
+   <button id="opwr" onclick="send('OLEDPWR:'+(D.oledOn?0:1));setTimeout(()=>send('DIAG'),200)">Screen off</button></div>
+  <label>Test patterns</label>
+  <div class="row"><button onclick="send('OLEDTEST:1')">All white</button><button onclick="send('OLEDTEST:2')">Checker</button><button onclick="send('OLEDTEST:3')">Grid</button><button onclick="send('OLEDTEST:0')">Back to page</button></div>
+  <p class="hint">The BOOT button on the board also changes pages (short press). A long press centres the gimbal and switches the laser off.</p>
+ </div>
+</div></div>
+</main>
+
+<script>
+const $=id=>document.getElementById(id),$$=s=>[...document.querySelectorAll(s)];
+let ws,S={},C={},D={},drag=false,prevMode=false,PV={pan:0,tilt:0};const PL=90,TL=45;
+function log(t){const l=$('log');l.textContent+=t+'\n';if(l.textContent.length>6000)l.textContent=l.textContent.slice(-4000);l.scrollTop=1e9}
+function send(c,echo){if(!c)return;if(echo)log('> '+c);if(ws&&ws.readyState==1)ws.send(c)}
+function confirmBox(m){return window.confirm(m)}
+function mode(m){send('MODE:'+(S.mode==m?'MANUAL':m))}
+function laserPulse(){send('L:1');setTimeout(()=>send('L:0'),1000)}
+function sendText(){send('OLEDTXT:'+$('otxt').value)}
+function camPreset(p){send('CAMP:'+p)}
+// tabs
+$$('.tabs button').forEach(b=>b.onclick=()=>{$$('.tabs button').forEach(x=>x.classList.toggle('on',x==b));$$('.pane').forEach(p=>p.classList.toggle('on',p.id==b.dataset.t));
+ if(b.dataset.t=='test'||b.dataset.t=='scr')send('DIAG');if(b.dataset.t=='camt')send('CAMGET');drawPad();try{localStorage.tab=b.dataset.t}catch(e){}});
+// calibration jog buttons
+$$('[data-jog]').forEach(r=>{for(const s of [-10,-2,-0.5,0.5,2,10]){const b=document.createElement('button');b.textContent=(s>0?'+':'')+s+'\u00b0';
+ b.onclick=()=>send(r.dataset.jog=='P'?'MV:'+s+',0':'MV:0,'+s);r.appendChild(b)}});
+function showCal(){$('calst').textContent=S.calOn?'calibrating (limits off, careful)':S.cal?'calibrated':'NOT calibrated';
+ $('calon').textContent=S.calOn?'Stop calibrating':'1. Start calibration';$('calon').classList.toggle('on',S.calOn);
+ $('invP').classList.toggle('on',S.invP);$('invT').classList.toggle('on',S.invT);
+ $('limv').textContent='pan '+S.lp[0]+'..'+S.lp[1]+'\u00b0, tilt '+S.lt[0]+'..'+S.lt[1]+'\u00b0';
+ $('cpan').textContent=S.pan.toFixed(1);$('ctilt').textContent=S.tilt.toFixed(1);$('ctrim').textContent=S.trimPan+' / '+S.trimTilt;$('cus').textContent=S.panUs+' / '+S.tiltUs+' \u00b5s'}
+// presets
+for(let i=1;i<=4;i++){const b=document.createElement('button');b.textContent='P'+i;let t;
+ b.onpointerdown=()=>{t=setTimeout(()=>{send('SAVEP:'+i,1);t=null},700)};b.onpointerup=()=>{if(t){clearTimeout(t);send('GO:'+i)}};$('pr').appendChild(b)}
+// aim pad
+const pad=$('pad'),g=pad.getContext('2d');
+function drawPad(){const w=pad.width=pad.clientWidth,h=pad.height=pad.clientHeight;if(!w)return;g.clearRect(0,0,w,h);
+ g.strokeStyle='#333';g.beginPath();g.moveTo(w/2,0);g.lineTo(w/2,h);g.moveTo(0,h/2);g.lineTo(w,h/2);g.stroke();
+ const x=w/2+(S.tp||0)/PL*w/2,y=h/2-(S.tt||0)/TL*h/2;g.strokeStyle='#5dade2';g.beginPath();g.arc(x,y,12,0,7);g.stroke();
+ const cx=w/2+(S.pan||0)/PL*w/2,cy=h/2-(S.tilt||0)/TL*h/2;g.fillStyle=S.laser?'#e74c3c':'#ff8a1f';g.beginPath();g.arc(cx,cy,8,0,7);g.fill()}
+function aim(e){const r=pad.getBoundingClientRect();const p=((e.clientX-r.left)/r.width*2-1)*PL,t=-((e.clientY-r.top)/r.height*2-1)*TL;
+ send('PT:'+p.toFixed(1)+','+t.toFixed(1))}
+pad.onpointerdown=e=>{drag=true;pad.setPointerCapture(e.pointerId);aim(e)};pad.onpointermove=e=>{if(drag)aim(e)};pad.onpointerup=()=>drag=false;
+document.onkeydown=e=>{if(e.target.tagName=='INPUT'&&e.target.type=='text')return;const k={ArrowLeft:'MV:-5,0',ArrowRight:'MV:5,0',ArrowUp:'MV:0,5',ArrowDown:'MV:0,-5',' ':'L:T',c:'C',C:'C'}[e.key];if(k){send(k);e.preventDefault()}};
+// single-axis sliders (or preview-only)
+let slideHold=0;
+$('ps').oninput=function(){slideHold=Date.now();$('pv').textContent=this.value;if(prevMode){PV.pan=+this.value;twinDirty=1}else send('PT:'+this.value+','+(S.tt||0))};
+$('ts').oninput=function(){slideHold=Date.now();$('tv2').textContent=this.value;if(prevMode){PV.tilt=+this.value;twinDirty=1}else send('PT:'+(S.tp||0)+','+this.value)};
+function preview(on){prevMode=on;PV={pan:S.pan||0,tilt:S.tilt||0};twinDirty=1}
+// camera controls
+$$('[data-k]').forEach(el=>{const k=el.dataset.k;el.addEventListener(el.type=='range'?'input':'change',()=>{const v=el.type=='checkbox'?(el.checked?1:0):el.value;
+ const o=document.querySelector('[data-v="'+k+'"]');if(o)o.textContent=v;clearTimeout(el._t);el._t=setTimeout(()=>send('CAM:'+k+','+v),120)})});
+function showCam(){$$('[data-k]').forEach(el=>{const v=C[el.dataset.k];if(v===undefined||document.activeElement==el)return;if(el.type=='checkbox')el.checked=!!v;else{if(el.tagName=='SELECT'&&![...el.options].some(o=>o.value==v))el.add(new Option('sensor: '+v,v));el.value=v}
+ const o=document.querySelector('[data-v="'+el.dataset.k+'"]');if(o)o.textContent=v});$('csn').textContent=C.sensor;
+ const res=['320x240','400x296','480x320','640x480','800x600','1024x768','1280x720','1280x1024','1600x1200'][C.res];C.resName=res;
+ const pr={FAST:[0,10,30],BAL:[3,12,25],HQ:[4,10,20],MAX:[8,12,8]};$$('[data-p]').forEach(b=>{const p=pr[b.dataset.p];b.classList.toggle('on',p[0]==C.res&&p[1]==C.q&&p[2]==C.fps)})}
+// video stream (MJPEG on :82)
+let camRetry;function startCam(){const img=$('cam');img.src='http://'+location.hostname+':82/stream?'+Date.now()}
+$('cam').onload=()=>{$('camerr').style.display='none'};
+$('cam').onerror=()=>{$('camerr').style.display='flex';$('camerr').textContent='No video. Retrying... (too many viewers, or the camera failed)';clearTimeout(camRetry);camRetry=setTimeout(startCam,2000)};
+function snap(){const i=$('cam'),c=document.createElement('canvas');c.width=i.naturalWidth;c.height=i.naturalHeight;if(!c.width)return;c.getContext('2d').drawImage(i,0,0);
+ const a=document.createElement('a');a.download='anvyxo_'+new Date().toISOString().replace(/[:.]/g,'-')+'.jpg';a.href=c.toDataURL('image/jpeg',0.95);a.click()}
+function full(){const v=$('vid');(v.requestFullscreen||v.webkitRequestFullscreen).call(v)}
+// pass/fail marks
+let marks={};try{marks=JSON.parse(localStorage.marks||'{}')}catch(e){}
+function paintMarks(){$$('.test[data-test]').forEach(t=>{const m=marks[t.dataset.test];t.querySelector('.pass').classList.toggle('on',m=='p');t.querySelector('.fail').classList.toggle('on',m=='f')})}
+$$('.test[data-test]').forEach(t=>{t.querySelector('.pass').onclick=()=>{marks[t.dataset.test]='p';saveMarks()};t.querySelector('.fail').onclick=()=>{marks[t.dataset.test]='f';saveMarks()}});
+function saveMarks(){try{localStorage.marks=JSON.stringify(marks)}catch(e){}paintMarks()}function resetMarks(){marks={};saveMarks()}paintMarks();
+function badge(id,cls,txt){const b=$(id);b.className='badge '+cls;b.textContent=txt}
+function showDiag(){$('d_reset').textContent=D.reset;$('d_up').textContent=Math.floor(D.up/60)+' min';$('d_heap').textContent=(D.heap/1024|0)+' KB';
+ $('d_psram').textContent=(D.psram/1048576).toFixed(0)+' MB';$('d_temp').textContent=D.temp.toFixed(0)+' °C';$('d_rssi').textContent=D.rssi+' dBm';$('d_fw').textContent=D.fw;
+ $('d_i2c').textContent=D.i2c;$('d_sensor').textContent=D.sensor;
+ badge('b_power',D.reset=='BROWNOUT'?'bad':D.reset=='crash'||D.reset=='watchdog'?'warn':'ok',D.reset=='BROWNOUT'?'brownout!':D.reset);
+ badge('b_oled',D.oled?'ok':'bad',D.oled?'found 0x3C':'not found');badge('b_cam',D.cam?'ok':'bad',D.cam?D.sensor:'no sensor');
+ $('ocv').textContent=D.oledC;if(document.activeElement!=$('oc'))$('oc').value=D.oledC;$('oinv').classList.toggle('on',D.oledInv);$('opwr').textContent=D.oledOn?'Screen off':'Screen on';
+ $$('[data-pg]').forEach(b=>b.classList.toggle('on',b.dataset.pg==D.page&&!D.oledTest))}
+function showStatus(){$('vp').textContent=S.pan.toFixed(0);$('vt').textContent=S.tilt.toFixed(0);$('vm').textContent=S.mode;$('vus').textContent=S.panUs+' / '+S.tiltUs+' µs';
+ $('bl').classList.toggle('on',S.laser);$('bl').textContent=S.laser?'Laser ON '+S.laserLeft+'s':'Laser';
+ ['PATROL','SCAN'].forEach(m=>$('m_'+m).classList.toggle('on',S.mode==m));
+ if(document.activeElement!=$('sp'))$('sp').value=S.speed;$('sv').textContent=S.speed;$('trv').textContent=S.cal?'done':'NOT DONE';$('trv').style.color=S.cal?'':'var(--warn)';showCal();
+ if(!prevMode&&Date.now()-slideHold>800){$('ps').value=Math.round(S.tp);$('pv').textContent=Math.round(S.tp);$('ts').value=Math.round(S.tt);$('tv2').textContent=Math.round(S.tt)}
+ $('ovl').textContent=(C.resName||'')+'  '+S.fps.toFixed(1)+' fps  '+S.kb.toFixed(0)+' KB'+(S.fps?'  '+(S.fps*S.kb*8/1024).toFixed(1)+' Mbit/s':'');
+ $('cfp').textContent=S.fps.toFixed(1);$('ckb').textContent=S.kb.toFixed(1);$('cvw').textContent=S.viewers;$('d_fps').textContent=S.fps.toFixed(1);
+ $('d_panEn').textContent=S.panEn?'on':'OFF (limp)';$('d_tiltEn').textContent=S.tiltEn?'on':'OFF (limp)';$('d_panUs').textContent=S.panUs;$('d_tiltUs').textContent=S.tiltUs;
+ $('d_pan').textContent=S.pan.toFixed(0);$('d_tilt').textContent=S.tilt.toFixed(0);
+ $('srvP').textContent=S.panEn?'Signal off (go limp)':'Signal on';$('srvT').textContent=S.tiltEn?'Signal off (go limp)':'Signal on';
+ $('srvP').classList.toggle('on',!S.panEn);$('srvT').classList.toggle('on',!S.tiltEn);
+ badge('b_laser',S.laser?'warn':'',S.laser?'ON':'off');
+ for(const a of ['pan','tilt']){const en=S[a+'En'];if(!en)badge('b_'+a,'warn','signal off');else badge('b_'+a,S.mode.startsWith('TEST')?'warn':'ok',S.mode.startsWith('TEST')?'testing':'driving')}
+ $('stt').textContent=(S.ap?'hotspot ':'wifi ')+S.ip+(S.ap?'':' '+S.rssi+' dBm')+' | heap '+(S.heap/1024|0)+'K';drawPad();twinDirty=1}
+function connect(){ws=new WebSocket('ws://'+location.hostname+':81/');
+ ws.onopen=()=>{$('dot').classList.add('on');send('CAMGET');send('DIAG')};
+ ws.onclose=()=>{$('dot').classList.remove('on');$('stt').textContent='reconnecting...';setTimeout(connect,1500)};
+ ws.onmessage=ev=>{const d=ev.data;if(d[0]!='{'){log(d);return}const j=JSON.parse(d);
+  if(j.t=='s'){S=j;showStatus()}else if(j.t=='c'){C=j;showCam()}else if(j.t=='d'){D=j;showDiag()}}}
+
+// ================= 3D twin: flat-shaded painter's renderer of the CAD mesh =================
+const META=/*MESH_META*/;const parts=[];
+(function(){const bin=atob('/*MESH_B64*/'),u8=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)u8[i]=bin.charCodeAt(i);
+ const dv=new DataView(u8.buffer);let o=0;while(o<u8.length){const grp=dv.getUint8(o),col=[dv.getUint8(o+1),dv.getUint8(o+2),dv.getUint8(o+3)],nv=dv.getUint16(o+4,1),nt=dv.getUint32(o+6,1);o+=10;
+  const P=new Float32Array(nv*3);for(let i=0;i<nv*3;i++){P[i]=dv.getInt16(o,1)/10;o+=2}
+  const T=new Uint16Array(nt*3);for(let i=0;i<nt*3;i++){T[i]=dv.getUint16(o,1);o+=2}
+  parts.push({grp,col,P,T,W:new Float32Array(nv*3)})}})();
+const cv=$('twin'),cx=cv.getContext('2d');let twinDirty=1,view={yaw:-35,pitch:22,dist:300},shown={pan:0,tilt:0};
+function resetView(){view={yaw:-35,pitch:22,dist:300};twinDirty=1}
+function poseFn(pan,tilt){const pc=-pan*Math.PI/180,tc=-tilt*Math.PI/180,cp=Math.cos(pc),sp=Math.sin(pc),ct=Math.cos(tc),st=Math.sin(tc),yz=META.yokeZ;
+ return (grp,x,y,z,out,k)=>{if(grp==2){const y2=y*ct-z*st;z=y*st+z*ct;y=y2}if(grp>=1){z+=yz;const x2=x*cp-y*sp;y=x*sp+y*cp;x=x2}out[k]=x;out[k+1]=y;out[k+2]=z}}
+function drawTwin(){const w=cv.width=cv.clientWidth*devicePixelRatio,h=cv.height=cv.clientHeight*devicePixelRatio;if(!w)return;
+ const pose=poseFn(shown.pan,shown.tilt);
+ const tgt=[0,0,META.yokeZ*0.75],yw=view.yaw*Math.PI/180,pt=view.pitch*Math.PI/180;
+ const eye=[tgt[0]+view.dist*Math.cos(pt)*Math.sin(yw),tgt[1]-view.dist*Math.cos(pt)*Math.cos(yw),tgt[2]+view.dist*Math.sin(pt)];
+ const nrm=v=>{const l=Math.hypot(v[0],v[1],v[2]);return[v[0]/l,v[1]/l,v[2]/l]},crs=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+ const f=nrm([tgt[0]-eye[0],tgt[1]-eye[1],tgt[2]-eye[2]]),r=nrm(crs(f,[0,0,1])),u=crs(r,f);
+ const L=nrm([-f[0]*0.8+u[0]*0.5-r[0]*0.3,-f[1]*0.8+u[1]*0.5-r[1]*0.3,-f[2]*0.8+u[2]*0.5-r[2]*0.3]);
+ const F=Math.min(w,h)*1.25,hx=w/2,hy=h/2;
+ const proj=(x,y,z)=>{const dx=x-eye[0],dy=y-eye[1],dz=z-eye[2],zc=dx*f[0]+dy*f[1]+dz*f[2];return[hx+F*(dx*r[0]+dy*r[1]+dz*r[2])/zc,hy-F*(dx*u[0]+dy*u[1]+dz*u[2])/zc,zc]};
+ const tris=[];
+ for(const p of parts){const P=p.P,W=p.W,n=P.length;for(let i=0;i<n;i+=3)pose(p.grp,P[i],P[i+1],P[i+2],W,i);
+  const S2=new Float32Array(n);for(let i=0;i<n;i+=3){const q=proj(W[i],W[i+1],W[i+2]);S2[i]=q[0];S2[i+1]=q[1];S2[i+2]=q[2]}
+  const T=p.T;for(let i=0;i<T.length;i+=3){const a=T[i]*3,b=T[i+1]*3,c=T[i+2]*3;
+   const ux=W[b]-W[a],uy=W[b+1]-W[a+1],uz=W[b+2]-W[a+2],vx=W[c]-W[a],vy=W[c+1]-W[a+1],vz=W[c+2]-W[a+2];
+   let nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx;
+   if(nx*(eye[0]-W[a])+ny*(eye[1]-W[a+1])+nz*(eye[2]-W[a+2])<=0)continue;   // back face
+   const nl=Math.hypot(nx,ny,nz)||1,li=0.32+0.68*Math.max(0,(nx*L[0]+ny*L[1]+nz*L[2])/nl);
+   tris.push([S2[a+2]+S2[b+2]+S2[c+2],S2[a],S2[a+1],S2[b],S2[b+1],S2[c],S2[c+1],p.col,li])}}
+ tris.sort((A,B)=>B[0]-A[0]);
+ cx.clearRect(0,0,w,h);cx.lineJoin='round';cx.lineWidth=0.6;
+ // floor shadow ring
+ cx.fillStyle='#0004';cx.beginPath();for(let a=0;a<=64;a++){const q=proj(62*Math.cos(a/10.19),62*Math.sin(a/10.19),0);a?cx.lineTo(q[0],q[1]):cx.moveTo(q[0],q[1])}cx.fill();
+ for(const t of tris){const c=t[7],li=t[8],s='rgb('+(c[0]*li|0)+','+(c[1]*li|0)+','+(c[2]*li|0)+')';cx.fillStyle=s;cx.strokeStyle=s;
+  cx.beginPath();cx.moveTo(t[1],t[2]);cx.lineTo(t[3],t[4]);cx.lineTo(t[5],t[6]);cx.closePath();cx.fill();cx.stroke()}
+ // aim line (camera) or laser beam, from the head
+ const ray=(org,len,col,wd,dash)=>{const a=[0,0,0],b=[0,0,0];pose(2,org[0],org[1],org[2],a,0);pose(2,org[0],org[1]-len,org[2],b,0);
+  const p1=proj(a[0],a[1],a[2]),p2=proj(b[0],b[1],b[2]);cx.setLineDash(dash);cx.strokeStyle=col;cx.lineWidth=wd*devicePixelRatio;cx.beginPath();cx.moveTo(p1[0],p1[1]);cx.lineTo(p2[0],p2[1]);cx.stroke();cx.setLineDash([])};
+ if(S.laser)ray(META.laser,320,'#ff3b30',2.5,[]);ray(META.cam,170,'#ff8a1f',1.2,[6,5]);
+ // target ghost aim (where it is going)
+ if(!prevMode&&S.tp!==undefined&&(Math.abs(S.tp-shown.pan)>1||Math.abs(S.tt-shown.tilt)>1)){const pz=poseFn(S.tp,S.tt),a=[0,0,0],b=[0,0,0];
+  pz(2,META.cam[0],META.cam[1],META.cam[2],a,0);pz(2,META.cam[0],META.cam[1]-170,META.cam[2],b,0);const p1=proj(...a),p2=proj(...b);
+  cx.strokeStyle='#5dade2';cx.lineWidth=1.2*devicePixelRatio;cx.setLineDash([3,4]);cx.beginPath();cx.moveTo(p1[0],p1[1]);cx.lineTo(p2[0],p2[1]);cx.stroke();cx.setLineDash([])}
+ cx.fillStyle='#9aa0a6';cx.font=(11*devicePixelRatio)+'px system-ui';
+ cx.fillText((prevMode?'PREVIEW  ':'LIVE  ')+'pan '+shown.pan.toFixed(0)+'°  tilt '+shown.tilt.toFixed(0)+'°',10*devicePixelRatio,18*devicePixelRatio)}
+function tick(){const goal=prevMode?PV:{pan:S.pan||0,tilt:S.tilt||0};let moved=false;
+ for(const k of ['pan','tilt']){const d=goal[k]-shown[k];if(Math.abs(d)>0.05){shown[k]+=d*0.35;moved=true}else shown[k]=goal[k]}
+ if(moved||twinDirty){twinDirty=0;drawTwin()}requestAnimationFrame(tick)}
+// orbit + zoom
+let od=null;cv.onpointerdown=e=>{od=[e.clientX,e.clientY];cv.setPointerCapture(e.pointerId);cv.style.cursor='grabbing'};
+cv.onpointermove=e=>{if(!od)return;view.yaw-= (e.clientX-od[0])*0.5;view.pitch=Math.max(-10,Math.min(85,view.pitch+(e.clientY-od[1])*0.4));od=[e.clientX,e.clientY];twinDirty=1};
+cv.onpointerup=()=>{od=null;cv.style.cursor='grab'};
+cv.onwheel=e=>{e.preventDefault();view.dist=Math.max(180,Math.min(900,view.dist*(e.deltaY>0?1.1:0.9)));twinDirty=1};
+let pinch=0;cv.addEventListener('touchmove',e=>{if(e.touches.length==2){const d=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);
+ if(pinch){view.dist=Math.max(180,Math.min(900,view.dist*pinch/d));twinDirty=1}pinch=d;e.preventDefault()}},{passive:false});cv.addEventListener('touchend',()=>pinch=0);
+window.onresize=()=>{drawPad();twinDirty=1};
+connect();startCam();tick();
+try{const t=location.hash.slice(1)||localStorage.tab;if(t)$$('.tabs button').find(b=>b.dataset.t==t)?.click()}catch(e){}
+</script></body></html>

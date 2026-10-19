@@ -1,0 +1,6 @@
+flask>=3.0
+opencv-python>=4.9
+numpy>=1.26
+websocket-client>=1.7
+ultralytics>=8.3   # YOLO11n person detector (pulls torch)
+mediapipe>=0.10   # optional face detector

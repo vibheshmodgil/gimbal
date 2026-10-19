@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ANVYXO Tracker</title>
+<style>
+:root{--bg:#111418;--panel:#1b1f25;--line:#2a3038;--text:#d7dce2;--dim:#8a939e;--acc:#ff8a1f;--ok:#3ccf6e;--bad:#ff5a5a;--pan:#4fb3ff;--tilt:#ff6bd6}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:13px system-ui,sans-serif}
+header{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--line)}
+header b{letter-spacing:3px}
+#stat{color:var(--dim);text-align:right}
+main{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(300px,1fr);gap:14px;padding:14px;max-width:1400px;margin:auto}
+@media (max-width:900px){main{grid-template-columns:1fr;padding:10px 16px}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;margin-bottom:12px}
+h3{margin:0 0 8px;font-size:11px;letter-spacing:2px;color:var(--dim);text-transform:uppercase;font-weight:600}
+#view{position:relative;width:100%;aspect-ratio:4/3;background:#000;border-radius:8px;overflow:hidden}
+#view img,#view canvas{position:absolute;inset:0;width:100%;height:100%}
+#ov{cursor:crosshair}
+#chart{width:100%;height:150px;display:block}
+.hint{color:var(--dim);margin:8px 0 0}
+.row{display:grid;grid-template-columns:100px minmax(0,1fr) 64px;gap:8px;align-items:center;margin:6px 0}
+.row input[type=range]{width:100%;accent-color:var(--acc)}
+input[type=number],select{width:100%;background:#0d0f12;color:var(--text);border:1px solid var(--line);border-radius:4px;padding:3px 5px;font:inherit}
+button{background:#262c34;color:var(--text);border:1px solid var(--line);border-radius:6px;padding:7px 10px;cursor:pointer;font:inherit}
+button:hover{border-color:var(--acc)}
+button.on{background:var(--acc);color:#111;border-color:var(--acc)}
+.btns{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+#track{width:100%;padding:12px;font-size:15px;font-weight:600}
+#track.on{background:var(--ok);border-color:var(--ok);color:#0b1a10}
+.kv{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+@media (max-width:500px){.kv{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.kv div{background:#14171c;border-radius:6px;padding:6px 8px;font-variant-numeric:tabular-nums}
+.kv span{display:block;color:var(--dim);font-size:10px;letter-spacing:1px;text-transform:uppercase}
+label.chk{display:inline-flex;gap:6px;align-items:center;margin:6px 14px 0 0}
+a{color:var(--acc)}
+.err{color:var(--bad)}
+#calbar{background:#3a1416;border-bottom:1px solid var(--bad);color:#ffd0d0;padding:10px 16px}
+#calbar label{margin:0 0 0 12px}
+.tabs{display:flex;gap:4px;margin-bottom:12px}.tabs button{flex:1;padding:10px 4px;font-weight:600}
+.pane{display:none}.pane.on{display:block}
+h4{margin:14px 0 6px;font-size:13px}
+.warn{color:#ffd23f}
+.ax{color:var(--dim);width:36px}
+</style>
+</head>
+<body>
+<header><b>ANVYXO TRACKER</b><span id="stat">connecting…</span></header>
+<div id="calbar" hidden>Gimbal NOT calibrated: do the <a href="#" id="calui">Setup tab</a> (mount, direction, zero, limits, Finish).
+  <label class="chk"><input type="checkbox" id="allow_uncalibrated">Track anyway (uncalibrated)</label></div>
+<main>
+<section>
+  <div class="panel">
+    <div id="view"><img id="cam" src="/video" alt="gimbal camera" style="filter:url(#viewgamma)"><canvas id="ov"></canvas></div>
+    <!-- view-only gamma: lifts shadows without blowing out lamps; the detector still gets the raw frame -->
+    <svg width="0" height="0" style="position:absolute"><filter id="viewgamma"><feComponentTransfer>
+      <feFuncR id="gR" type="gamma" exponent="1"/><feFuncG id="gG" type="gamma" exponent="1"/><feFuncB id="gB" type="gamma" exponent="1"/>
+    </feComponentTransfer></filter></svg>
+    <div class="row"><span>View brightness</span><input type="range" min="1" max="4" step="0.1" id="viewb"><span id="viewbv"></span></div>
+    <p class="hint">Click a box to lock that person. Green = locked · yellow ring = predicted aim point · white cross = image centre.</p>
+  </div>
+  <div class="panel">
+    <h3>Error (deg) · <span style="color:var(--pan)">pan</span> · <span style="color:var(--tilt)">tilt</span> · grey band = deadband · last 10 s</h3>
+    <canvas id="chart"></canvas>
+  </div>
+  <div class="panel kv" id="kv"></div>
+</section>
+<section>
+  <div class="tabs"><button data-tab="track">Track</button><button data-tab="aim">Aim</button><button data-tab="setup">Setup</button><button data-tab="tune">Tuning</button></div>
+
+  <div class="pane" id="tab_track">
+  <div class="panel">
+    <button id="track">Start tracking</button>
+    <div class="btns" style="margin-top:8px"><button id="unlock">Release lock (auto)</button><button id="centre">Stop + go home</button></div>
+  </div>
+  <div class="panel">
+    <h3>Laser <span id="laserdot" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:#333;margin-left:6px;vertical-align:middle"></span></h3>
+    <div class="btns">
+      <button data-laser="off">Off</button><button data-laser="on">On</button><button data-laser="flash">Flash every N s</button>
+      <button data-laser="blink">Blink 1 Hz</button><button data-laser="strobe">Strobe 5 Hz</button><button data-laser="sos">SOS</button>
+    </div>
+    <div class="btns" style="margin-top:8px"><button id="laser_feet">Dot at feet (laser while tracking)</button></div>
+    <div class="row"><span>Flash every</span><input type="range" min="1" max="10" step="0.5" id="r_laser_period"><input type="number" min="1" max="10" step="0.5" id="n_laser_period"></div>
+    <p class="hint" id="lasermsg">Locked out while tracking (except Dot at feet: aims below the feet, cuts out if the beam rises above the knees) or when anyone is in the middle of the picture (the beam). The gimbal also cuts it after 60 s on. Never look into the laser.</p>
+  </div>
+  </div>
+
+  <div class="pane" id="tab_aim">
+  <div class="panel"><h3>Aim by hand (stops tracking)</h3>
+    <div class="btns"><button data-g="MV:-10,0">&larr; 10&deg;</button><button data-g="MV:0,10">&uarr; 10&deg;</button><button data-g="MV:0,-10">&darr; 10&deg;</button><button data-g="MV:10,0">10&deg; &rarr;</button><button data-g="C">Centre</button></div>
+    <div class="row"><span>Pan</span><input type="range" id="aim_p" min="-90" max="90" step="1"><span id="aim_pv"></span></div>
+    <div class="row"><span>Tilt</span><input type="range" id="aim_t" min="-45" max="45" step="1"><span id="aim_tv"></span></div>
+    <div class="row"><span>Speed &deg;/s</span><input type="range" id="spd" min="10" max="360" step="10"><span id="spdv"></span></div>
+    <div class="btns"><button data-g="MODE:PATROL">Patrol</button><button data-g="MODE:SCAN">Scan</button><button data-g="MODE:MANUAL">Stop</button><button id="motors">Motors off (limp)</button></div>
+    <p class="hint">Arrow keys aim 5&deg; too.</p>
+  </div>
+  <div class="panel"><h3>Camera</h3>
+    <div class="btns"><button data-c="CAMP:FAST">Fast 320</button><button data-c="CAMP:BAL">Balanced 640</button><button data-c="CAMP:HQ">Sharp 800</button></div>
+    <label class="chk"><input type="checkbox" data-cam="vflip">Flip vertical</label><label class="chk"><input type="checkbox" data-cam="hm">Mirror</label><label class="chk"><input type="checkbox" data-cam="aec2">Low-light</label>
+    <div class="row"><span>Exposure</span><input type="range" min="-3" max="3" step="1" id="ael"><span id="aelv"></span></div>
+    <div class="btns"><button data-c="CAMSAVE">Save camera</button></div>
+    <p class="hint">Fast 320 = least lag (best for tracking).</p>
+  </div>
+  </div>
+
+  <div class="pane" id="tab_setup">
+  <div class="panel"><h3>Setup &middot; <span id="calst">-</span></h3>
+    <p class="hint" style="margin-top:0">Once after building, or after taking the head off. Every button saves on the gimbal straight away.</p>
+    <div class="btns" style="margin-top:8px"><button id="calon">Start setup (limits off)</button><button id="calreset">Forget everything</button></div>
+
+    <h4>1. Mount: same travel both ways</h4>
+    <div id="reach" class="hint" style="margin-top:0"></div>
+    <div class="btns" style="margin-top:6px"><span class="ax">Pan</span><button data-g="CAL:MP0">End A (0&deg;)</button><button data-g="CAL:MP90">Middle</button><button data-g="CAL:MP180">End B (180&deg;)</button></div>
+    <div class="btns" style="margin-top:6px"><span class="ax">Tilt</span><button data-g="CAL:MT0">End A (0&deg;)</button><button data-g="CAL:MT90">Middle</button><button data-g="CAL:MT180">End B (180&deg;)</button></div>
+    <p class="hint">Press <b>Middle</b> and wait until it stops. Undo the horn screw, pull the part off the servo spline and push it back on pointing <b>straight ahead</b> (tilt: <b>level</b>), screw it in.
+      Or press an <b>End</b> and put the part back on turned fully to that side. Spline teeth are ~14&deg; apart, so just get close: step 3 trims the rest.</p>
+
+    <h4>2. Direction: match the buttons</h4>
+    <div class="btns"><button data-g="MV:10,0">Pan +10&deg;</button><button id="invP" data-g="CAL:IP">Reverse pan</button><button data-g="MV:0,10">Tilt +10&deg;</button><button id="invT" data-g="CAL:IT">Reverse tilt</button></div>
+    <p class="hint">Seen from behind: <b>+pan must turn right</b>, <b>+tilt must look up</b>. Wrong way: press Reverse (orange = reversed). The head doesn't move when you press it.</p>
+
+    <h4>3. Zero: camera straight ahead and level</h4>
+    <div class="btns" data-jog="P"><span class="ax">Pan</span></div>
+    <div class="btns" data-jog="T" style="margin-top:6px"><span class="ax">Tilt</span></div>
+    <div class="btns" style="margin-top:6px"><button data-g="CAL:ZP">Pan zero here</button><button data-g="CAL:ZT">Tilt zero here</button></div>
+
+    <h4>4. Limits <span id="limv" class="hint"></span></h4>
+    <p class="hint" style="margin-top:0">Jog with step 3 to each end. Stop just <b>before</b> anything rubs or a cable pulls, then set that end.</p>
+    <div class="btns"><button data-g="CAL:LP-">Left end here</button><button data-g="CAL:LP+">Right end here</button><button data-g="CAL:LT-">Down end here</button><button data-g="CAL:LT+">Up end here</button></div>
+
+    <h4>5. Done</h4>
+    <div class="btns"><button id="caldone">Finish and go to centre</button></div>
+    <div class="kv" id="calkv" style="margin-top:10px"></div>
+  </div>
+  </div>
+
+  <div class="pane" id="tab_tune">
+  <div class="panel">
+    <h3>Detector</h3>
+    <div class="row"><span>Model</span>
+      <select id="detector"><option value="person">Person · YOLO11n (robust)</option><option value="face">Face · MediaPipe (fast, frontal only)</option></select><span></span></div>
+    <div id="det"></div>
+  </div>
+  <div class="panel"><h3>PID pan</h3><div id="pidp"></div><h3 style="margin-top:12px">PID tilt</h3><div id="pidt"></div>
+    <div class="btns" style="margin-top:8px"><span class="hint" style="margin:0">Step test (while locked):</span><button data-kick="12,0">Kick pan 12°</button><button data-kick="0,8">Kick tilt 8°</button></div>
+    <p class="hint">Kp = deg/s per deg of error. Raise Kp until it starts to overshoot, then back off ~30%. Kd damps overshoot. Ki only if it settles off-centre.</p></div>
+  <div class="panel"><h3>Motion</h3><div id="mot"></div>
+    <label class="chk"><input type="checkbox" id="search">Look around when nobody is locked</label>
+    <label class="chk"><input type="checkbox" id="pan_sign">Tracker steers away left/right</label><label class="chk"><input type="checkbox" id="tilt_sign">Tracker steers away up/down</label>
+    <p class="hint">Fix the gimbal's own direction in Setup step 2 first. Tick these only if tracking then still turns <i>away</i> from the person (mirrored picture).</p>
+    <div class="btns" style="margin-top:10px"><button id="homehere">Set home = current position</button><span id="homev" class="hint" style="margin:0"></span></div>
+  </div>
+  <div class="panel btns"><button id="save">Save settings</button><button id="reset">Reset defaults</button><span id="msg" class="hint" style="margin:0"></span>
+    <a id="gui" target="_blank" rel="noopener" style="margin-left:auto">Gimbal's own page (wiring test, OLED) ↗</a></div>
+  </div>
+</section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+function setView(v){ for (const id of ['gR','gG','gB']) $(id).setAttribute('exponent', (1 / v).toFixed(3)); $('viewb').value = v; $('viewbv').textContent = (+v).toFixed(1) + '×';
+  try { localStorage.setItem('viewb', v); } catch (e) {} }
+let vb0 = 1.6; try { vb0 = +(localStorage.getItem('viewb') || 1.6); } catch (e) {}
+setView(vb0);
+$('viewb').oninput = e => setView(+e.target.value);
+// the MJPEG <img> never retries by itself: reconnect on error, and whenever it shows no picture
+const cam = $('cam'), reconnect = () => { cam.src = '/video?' + Date.now(); };
+cam.onerror = () => setTimeout(reconnect, 1000);
+setInterval(() => { if (!cam.naturalWidth) reconnect(); }, 3000);
+const post = (u, b) => fetch(u, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(b || {})}).then(r => r.json()).catch(() => ({}));
+const SLIDERS = {
+  det: [['detect_hz','Detect / s',1,15,1],['conf','Confidence',0.1,0.9,0.05],['aim','Aim height',0,0.5,0.01]],
+  pidp:[['kp_pan','Kp',0,8,0.05],['ki_pan','Ki',0,3,0.02],['kd_pan','Kd',0,1,0.01]],
+  pidt:[['kp_tilt','Kp',0,8,0.05],['ki_tilt','Ki',0,3,0.02],['kd_tilt','Kd',0,1,0.01]],
+  mot: [['deadband','Deadband pan °',0,5,0.1],['deadband_tilt','Deadband tilt °',0,8,0.1],['max_speed','Max speed °/s',10,240,5],['ff','Feed-forward',0,1,0.05],['latency','Latency s',0,0.8,0.01],
+        ['smooth','Smoothing',0,0.9,0.05],['hfov','Camera FOV °',30,120,0.5],['vfov','Tilt FOV ° (0=auto)',0,120,0.5],['lost_s','Hold if lost s',0.2,5,0.1],['release_s','Drop lock s',0.5,10,0.5],['reacquire_s','Re-acquire s',0,10,0.5],
+        ['search_after','Search after s',1,15,0.5],['search_speed','Search °/s',5,40,1]],
+};
+let P = {}, S = null, editing = {}, pending = {}, timer;
+function setP(o){ Object.assign(P, o); Object.assign(pending, o); for (const k in o) editing[k] = Date.now();
+  clearTimeout(timer); timer = setTimeout(() => { const sent = pending; pending = {};
+    post('/api/params', sent).then(r => { if (r.ok === false) { $('msg').innerHTML = `<span class="err">${r.reason}</span>`; for (const k in sent) editing[k] = 0; } }); }, 60); }
+
+for (const [box, list] of Object.entries(SLIDERS)) for (const [k, label, mn, mx, st] of list) {
+  const r = document.createElement('div'); r.className = 'row';
+  r.innerHTML = `<span>${label}</span><input type="range" min="${mn}" max="${mx}" step="${st}" id="r_${k}"><input type="number" min="${mn}" max="${mx}" step="${st}" id="n_${k}">`;
+  $(box).appendChild(r);
+  for (const el of r.querySelectorAll('input')) el.oninput = () => { const v = +el.value; $('r_'+k).value = v; $('n_'+k).value = v; setP({[k]: v}); };
+}
+$('detector').onchange = e => setP({detector: e.target.value});
+$('pan_sign').onchange = e => setP({pan_sign: e.target.checked ? -1 : 1});
+$('tilt_sign').onchange = e => setP({tilt_sign: e.target.checked ? -1 : 1});
+$('search').onchange = e => setP({search: e.target.checked});
+$('track').onclick = () => setP({tracking: !P.tracking});
+$('unlock').onclick = () => post('/api/lock', {id: null});
+$('centre').onclick = () => post('/api/home');
+$('homehere').onclick = () => post('/api/home_here').then(r => $('msg').textContent = r.ok ? `Home set to pan ${r.home[0].toFixed(1)}°, tilt ${r.home[1].toFixed(1)}° (press Save settings to keep it)` : (r.reason || 'failed'));
+$('allow_uncalibrated').onchange = e => setP({allow_uncalibrated: e.target.checked});
+$('laser_feet').onclick = () => setP({laser_feet: !P.laser_feet});
+$('save').onclick = () => post('/api/save').then(r => $('msg').textContent = r.ok ? 'Saved to Tracker/params.json' : 'Save failed');
+$('reset').onclick = () => post('/api/reset').then(() => $('msg').textContent = 'Defaults restored (not saved)');
+document.querySelectorAll('[data-laser]').forEach(b => b.onclick = () => setP({laser_mode: b.dataset.laser}));
+for (const el of [$('r_laser_period'), $('n_laser_period')]) el.oninput = () => { const v = +el.value; $('r_laser_period').value = v; $('n_laser_period').value = v; setP({laser_period: v}); };
+document.querySelectorAll('[data-kick]').forEach(b => b.onclick = () => { const [p, t] = b.dataset.kick.split(',').map(Number); post('/api/kick', {pan: p, tilt: t}); });
+document.querySelectorAll('[data-c]').forEach(b => b.onclick = () => post('/api/gimbal', {c: b.dataset.c}));
+document.querySelectorAll('[data-cam]').forEach(c => c.onchange = () => post('/api/gimbal', {c: `CAM:${c.dataset.cam},${c.checked ? 1 : 0}`}));
+$('ael').onchange = e => post('/api/gimbal', {c: `CAM:ael,${e.target.value}`});
+
+// ---- tabs (remembered per browser)
+function tab(t){ document.querySelectorAll('[data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+  document.querySelectorAll('.pane').forEach(p => p.classList.toggle('on', p.id === 'tab_' + t)); try { localStorage.setItem('tab', t); } catch (e) {} }
+document.querySelectorAll('[data-tab]').forEach(b => b.onclick = () => tab(b.dataset.tab));
+let tab0 = 'track'; try { tab0 = localStorage.getItem('tab') || 'track'; } catch (e) {}
+tab($('tab_' + tab0) ? tab0 : 'track');
+$('calui').onclick = e => { e.preventDefault(); tab('setup'); };
+
+// ---- aim + setup: straight gimbal commands (the server stops tracking on any move)
+const G = c => post('/api/gimbal', {c});
+document.querySelectorAll('[data-g]').forEach(b => b.onclick = () => G(b.dataset.g));
+document.querySelectorAll('[data-jog]').forEach(r => { for (const d of [-10, -2, -0.5, 0.5, 2, 10]) {
+  const b = document.createElement('button'); b.textContent = (d > 0 ? '+' : '') + d + '°';
+  b.onclick = () => G(r.dataset.jog === 'P' ? `MV:${d},0` : `MV:0,${d}`); r.appendChild(b); } });
+let aimHold = 0, aimT;
+for (const id of ['aim_p', 'aim_t']) $(id).oninput = () => { aimHold = Date.now(); clearTimeout(aimT);
+  aimT = setTimeout(() => G(`PT:${$('aim_p').value},${$('aim_t').value}`), 50); };
+$('spd').onchange = e => G('SPD:' + e.target.value);
+$('motors').onclick = () => { const on = S && S.gimbal.panEn === false ? 1 : 0; G(`SRV:P,${on}`); G(`SRV:T,${on}`); };
+$('calon').onclick = () => G(S && S.gimbal.calOn ? 'CAL:OFF' : 'CAL:ON');
+$('calreset').onclick = () => { if (confirm('Forget zero, direction and limits?')) G('CAL:RESET'); };
+$('caldone').onclick = () => G('CAL:DONE').then(() => G('C'));
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'SELECT' || (e.target.tagName === 'INPUT' && e.target.type !== 'checkbox')) return;
+  const k = {ArrowLeft: 'MV:-5,0', ArrowRight: 'MV:5,0', ArrowUp: 'MV:0,5', ArrowDown: 'MV:0,-5'}[e.key];
+  if (k) { G(k); e.preventDefault(); } });
+
+function renderGimbal(gm){
+  if (gm.pan == null) return;
+  const f0 = v => Math.round(v), rng = a => a ? `${f0(a[0])}…${f0(a[1])}°` : '–';
+  $('calst').innerHTML = gm.calOn ? '<span class="warn">setting up: limits off, go gently</span>' : gm.cal ? 'calibrated' : '<span class="warn">NOT calibrated</span>';
+  $('calon').textContent = gm.calOn ? 'Stop setup' : 'Start setup (limits off)'; $('calon').classList.toggle('on', !!gm.calOn);
+  $('invP').classList.toggle('on', !!gm.invP); $('invT').classList.toggle('on', !!gm.invT);
+  $('limv').textContent = `pan ${rng(gm.lp)}, tilt ${rng(gm.lt)}`;
+  // lopsided = the horn sits off-centre on the spline: one side has much less travel than the other
+  const side = (r, name) => !r ? `${name}: flash firmware 3.4 to see its reach.`
+    : `${name} reaches ${f0(-r[0])}° one way, ${f0(r[1])}° the other` + (Math.abs(r[0] + r[1]) > 30 ? ' <b class="warn">lopsided: re-mount it</b>' : ' ✓');
+  $('reach').innerHTML = side(gm.rp, 'Pan') + '<br>' + side(gm.rt, 'Tilt');
+  $('calkv').innerHTML = [['Pan', f1(gm.pan) + '°'], ['Tilt', f1(gm.tilt) + '°'], ['Trim', `${gm.trimPan} / ${gm.trimTilt}`], ['Pulse µs', `${gm.panUs} / ${gm.tiltUs}`]]
+    .map(([k, v]) => `<div><span>${k}</span>${v}</div>`).join('');
+  if (Date.now() - aimHold > 800) {
+    const lim = (el, r) => { if (r) { el.min = r[0]; el.max = r[1]; } };
+    lim($('aim_p'), gm.calOn ? gm.rp : gm.lp); lim($('aim_t'), gm.calOn ? gm.rt : gm.lt);
+    $('aim_p').value = gm.tp; $('aim_t').value = gm.tt;
+  }
+  $('aim_pv').textContent = f0(gm.pan) + '°'; $('aim_tv').textContent = f0(gm.tilt) + '°';
+  if (document.activeElement !== $('spd')) $('spd').value = gm.speed;
+  $('spdv').textContent = gm.speed;
+  $('motors').textContent = gm.panEn === false ? 'Motors on' : 'Motors off (limp)'; $('motors').classList.toggle('on', gm.panEn === false);
+  document.querySelectorAll('[data-g^="MODE:"]').forEach(b => b.classList.toggle('on', gm.mode !== 'MANUAL' && b.dataset.g === 'MODE:' + gm.mode));
+}
+
+// ---- overlay + lock by click
+const ov = $('ov'), g = ov.getContext('2d');
+ov.onclick = e => {
+  if (!S) return;
+  const r = ov.getBoundingClientRect(), x = (e.clientX - r.left) / r.width, y = (e.clientY - r.top) / r.height;
+  const t = S.tracks.find(t => t.fresh && x >= t.box[0] && x <= t.box[2] && y >= t.box[1] && y <= t.box[3]);
+  if (t) post('/api/lock', {id: t.id});
+};
+function drawOverlay(){
+  const W = ov.clientWidth, H = ov.clientHeight;
+  if (ov.width !== W || ov.height !== H) { ov.width = W; ov.height = H; }
+  g.clearRect(0, 0, W, H);
+  g.strokeStyle = 'rgba(255,255,255,.4)'; g.lineWidth = 1;
+  g.beginPath(); g.moveTo(W/2-12, H/2); g.lineTo(W/2+12, H/2); g.moveTo(W/2, H/2-12); g.lineTo(W/2, H/2+12); g.stroke();
+  g.font = '12px system-ui';
+  for (const t of S.tracks) {
+    if (!t.fresh) continue;
+    const [x1, y1, x2, y2] = t.box, c = t.locked ? '#3ccf6e' : '#aab3bd';
+    g.strokeStyle = c; g.lineWidth = t.locked ? 3 : 1.5; g.strokeRect(x1*W, y1*H, (x2-x1)*W, (y2-y1)*H);
+    const label = `ID ${t.id}${t.locked ? ' · LOCKED' : ''} · ${Math.round(t.score*100)}%`;
+    g.fillStyle = c; g.fillRect(x1*W, y1*H - 17, g.measureText(label).width + 8, 17);
+    g.fillStyle = '#111'; g.fillText(label, x1*W + 4, y1*H - 5);
+  }
+  // what the tracker is doing right now, big enough to read from across the room
+  const m = S.mode || 'OFF', col = m.startsWith('TRACK') ? '#3ccf6e' : m.startsWith('SEARCH') ? '#4fb3ff' : m.startsWith('LOST') ? '#ff5a5a' : '#8a939e';
+  const sub = m.startsWith('TRACK') ? `error ${S.e[0].toFixed(1)}° / ${S.e[1].toFixed(1)}°  ·  turning ${S.out[0].toFixed(0)} / ${S.out[1].toFixed(0)} °/s`
+            : m.startsWith('SEARCH') || m.includes('HOME') ? `looking around · pan ${f1(S.gimbal.pan)}° tilt ${f1(S.gimbal.tilt)}°` : m.startsWith('LOST') ? 'person not seen · holding still' : 'tracking is off';
+  g.font = 'bold 16px system-ui'; const bw = Math.max(g.measureText(m).width, (g.font = '12px system-ui', g.measureText(sub).width)) + 20;
+  g.fillStyle = 'rgba(0,0,0,.6)'; g.fillRect(8, 8, bw, 44); g.fillStyle = col; g.fillRect(8, 8, 4, 44);
+  g.font = 'bold 16px system-ui'; g.fillText(m, 18, 28); g.font = '12px system-ui'; g.fillStyle = '#d7dce2'; g.fillText(sub, 18, 45);
+  if (S.laser && S.laser.on) { g.fillStyle = 'rgba(255,40,40,.9)'; g.beginPath(); g.arc(W/2, H/2 - 6, 5, 0, 7); g.fill(); }   // beam: just above the lens
+  if (S.aim) { g.strokeStyle = S.lost ? '#ff5a5a' : '#ffd23f'; g.lineWidth = 2; g.beginPath(); g.arc(S.aim[0]*W, S.aim[1]*H, 9, 0, 7); g.stroke(); }
+}
+
+// ---- error chart
+const ch = $('chart'), cg = ch.getContext('2d'), hist = [];
+function drawChart(){
+  const W = ch.clientWidth, H = ch.clientHeight;
+  if (ch.width !== W || ch.height !== H) { ch.width = W; ch.height = H; }
+  cg.clearRect(0, 0, W, H);
+  const span = Math.max(10, ...hist.map(h => Math.max(Math.abs(h[0]), Math.abs(h[1])))), y = v => H/2 - v / span * (H/2 - 6);
+  cg.fillStyle = 'rgba(255,255,255,.07)'; cg.fillRect(0, y(P.deadband || 0), W, y(-(P.deadband || 0)) - y(P.deadband || 0));
+  cg.strokeStyle = '#2a3038'; cg.beginPath(); cg.moveTo(0, H/2); cg.lineTo(W, H/2); cg.stroke();
+  cg.fillStyle = '#8a939e'; cg.font = '10px system-ui'; cg.fillText(`±${span.toFixed(0)}°`, 4, 12);
+  for (const [i, col] of [[0, '#4fb3ff'], [1, '#ff6bd6']]) {
+    cg.strokeStyle = col; cg.lineWidth = 1.5; cg.beginPath();
+    hist.forEach((h, j) => { const x = W - (hist.length - 1 - j) * W / 149; j ? cg.lineTo(x, y(h[i])) : cg.moveTo(x, y(h[i])); });
+    cg.stroke();
+  }
+}
+
+// ---- live state
+const f1 = v => v == null ? '–' : (+v).toFixed(1);
+function render(){
+  for (const k in P) {
+    if (Date.now() - (editing[k] || 0) < 1500) continue;            // don't fight the slider being dragged
+    if ($('r_'+k)) { $('r_'+k).value = P[k]; $('n_'+k).value = P[k]; }
+  }
+  if (Date.now() - (editing.detector || 0) > 1500) $('detector').value = P.detector;
+  $('pan_sign').checked = P.pan_sign < 0; $('tilt_sign').checked = P.tilt_sign < 0; $('search').checked = !!P.search;
+  $('track').textContent = P.tracking ? 'Tracking — click to stop' : 'Start tracking';
+  $('track').classList.toggle('on', !!P.tracking);
+  document.querySelectorAll('[data-laser]').forEach(b => b.classList.toggle('on', b.dataset.laser === P.laser_mode));
+  $('laser_feet').classList.toggle('on', !!P.laser_feet);
+  const L = S.laser || {};
+  $('laserdot').style.background = L.on ? '#ff3b3b' : '#333';
+  $('lasermsg').innerHTML = L.block ? `<span class="err">Laser blocked: ${L.block}</span>` : L.msg ? L.msg : 'Locked out while tracking (except Dot at feet: aims below the feet, cuts out if the beam rises above the knees) or when anyone is in the middle of the picture (the beam). The gimbal also cuts it after 60 s on. Never look into the laser.';
+  const c = S.cam || {};
+  document.querySelectorAll('[data-cam]').forEach(el => { if (c[el.dataset.cam] != null) el.checked = !!c[el.dataset.cam]; });
+  if (c.ael != null && document.activeElement !== $('ael')) $('ael').value = c.ael;
+  $('aelv').textContent = $('ael').value;
+  $('gui').href = `http://${S.gimbal.ip}/`;
+  renderGimbal(S.gimbal);
+  $('calbar').hidden = S.gimbal.cal !== false;
+  $('allow_uncalibrated').checked = !!P.allow_uncalibrated;
+  $('homev').textContent = S.home ? `home: pan ${f1(S.home[0])}°, tilt ${f1(S.home[1])}°` + (S.gimbal.lp ? ` · limits pan ${S.gimbal.lp.join('…')}°, tilt ${S.gimbal.lt.join('…')}°` : '') : '';
+  const gm = S.gimbal, problems = [!gm.connected && 'gimbal control offline', S.stream.err && 'video: ' + S.stream.err, S.det.err].filter(Boolean);
+  $('stat').innerHTML = problems.length ? `<span class="err">${problems.join(' · ')}</span>` : `gimbal online · video ${S.stream.fps} fps · ${P.detector} ${S.det.hz}/s`;
+  const lockTxt = S.locked == null ? 'none' : S.lost ? `${S.locked} (lost)` : S.locked;
+  const t = S.terms;
+  $('kv').innerHTML = [
+    ['Video fps', S.stream.fps], ['Detect /s', S.det.hz], ['Model ms', S.det.ms], ['Locked ID', lockTxt],
+    ['Gimbal pan', f1(gm.pan) + '°'], ['Gimbal tilt', f1(gm.tilt) + '°'], ['Error pan', `${f1(S.e[0])}° · ${Math.round(S.epx[0])}px`], ['Error tilt', `${f1(S.e[1])}° · ${Math.round(S.epx[1])}px`],
+    ['Pan P/I/D', t[0].map(f1).join(' / ')], ['Tilt P/I/D', t[1].map(f1).join(' / ')], ['Rate °/s', S.out.map(f1).join(' , ')], ['Gimbal viewers', gm.viewers ?? '–'],
+  ].map(([k, v]) => `<div><span>${k}</span>${v}</div>`).join('');
+}
+const es = new EventSource('/events');
+es.onmessage = e => {
+  S = JSON.parse(e.data);
+  for (const k in S.P) if (Date.now() - (editing[k] || 0) > 1500) P[k] = S.P[k];
+  hist.push(S.e); if (hist.length > 150) hist.shift();
+  render(); drawOverlay(); drawChart();
+};
+es.onerror = () => $('stat').innerHTML = '<span class="err">tracker server not reachable</span>';
+</script>
+</body>
+</html>

@@ -1,0 +1,90 @@
+{
+    "error_string": "Success.",
+    "export_time": 596,
+    "layer_height": 0.20000000298023224,
+    "plate_index": 0,
+    "prepare_time": 65,
+    "return_code": 0,
+    "sliced_plates": [
+        {
+            "feature_type_times": {
+                "Bottom surface": 624.2608032226563,
+                "Bridge": 949.7999877929688,
+                "Custom": 2.090559959411621,
+                "Inner wall": 1254.4437255859375,
+                "Internal solid infill": 4891.7841796875,
+                "Outer wall": 584.1614990234375,
+                "Overhang wall": 16.380685806274414,
+                "Skirt": 13.204747200012207,
+                "Sparse infill": 531.6409912109375,
+                "Top surface": 782.1022338867188,
+                "Travel": 438.9977111816406,
+                "Undefined": 438.2359924316406
+            },
+            "filament_change_times": 0,
+            "filaments": [
+                {
+                    "filament_id": "",
+                    "id": 1,
+                    "main_used_g": 0.0,
+                    "total_used_g": 0.0
+                }
+            ],
+            "generate_support_material_time": 29,
+            "id": 1,
+            "infill_time": 264,
+            "layer_filament_change": 0,
+            "main_predication": 10086.9423828125,
+            "make_perimeters_time": 296,
+            "obj_cached_cnt": 0,
+            "objects": [
+                {
+                    "bbox": {
+                        "depth": 93.37300109863281,
+                        "height": 5.5,
+                        "width": 84.4000015258789,
+                        "x": 75.09999084472656,
+                        "y": 53.31349182128906,
+                        "z": 0.0
+                    },
+                    "id": 57,
+                    "name": "stl_oriented/bottom_plate.stl",
+                    "triangle_count": 7008
+                },
+                {
+                    "bbox": {
+                        "depth": 42.94679260253906,
+                        "height": 6.5,
+                        "width": 33.599998474121094,
+                        "x": 40.5,
+                        "y": 103.7397232055664,
+                        "z": 0.0
+                    },
+                    "id": 68,
+                    "name": "stl_oriented/head_floor.stl",
+                    "triangle_count": 5832
+                },
+                {
+                    "bbox": {
+                        "depth": 20.499998092651367,
+                        "height": 9.675000190734863,
+                        "width": 12.99857234954834,
+                        "x": 61.10141372680664,
+                        "y": 82.23976135253906,
+                        "z": 0.0
+                    },
+                    "id": 79,
+                    "name": "stl_oriented/axle_pin.stl",
+                    "triangle_count": 740
+                }
+            ],
+            "sliced_time": 1385,
+            "sliced_time_with_cache": 739,
+            "total_predication": 10088.271484375,
+            "triangle_count": 13580,
+            "warning_message": ""
+        }
+    ],
+    "sparse_infill_density": 25.0,
+    "wall_loops": 4
+}

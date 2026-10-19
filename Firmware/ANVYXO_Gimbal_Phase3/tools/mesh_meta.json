@@ -1,0 +1,92 @@
+{
+ "parts": [
+  [
+   "base",
+   "base",
+   3056
+  ],
+  [
+   "bottom_plate",
+   "base",
+   1070
+  ],
+  [
+   "yoke",
+   "yoke",
+   1840
+  ],
+  [
+   "servo_cap",
+   "yoke",
+   432
+  ],
+  [
+   "axle_pin",
+   "yoke",
+   128
+  ],
+  [
+   "head",
+   "head",
+   2856
+  ],
+  [
+   "head_floor",
+   "head",
+   1000
+  ],
+  [
+   "MG996R",
+   "base",
+   160
+  ],
+  [
+   "MG996R_horn",
+   "yoke",
+   248
+  ],
+  [
+   "MG90S",
+   "yoke",
+   1606
+  ],
+  [
+   "MG90S_horn",
+   "head",
+   332
+  ],
+  [
+   "608ZZ",
+   "head",
+   168
+  ],
+  [
+   "laser_12mm",
+   "head",
+   80
+  ],
+  [
+   "ESP32S3_CAM",
+   "head",
+   332
+  ],
+  [
+   "OLED_096",
+   "base",
+   380
+  ]
+ ],
+ "yokeZ": 99.9,
+ "laser": [
+  0,
+  -16.8,
+  38.25
+ ],
+ "cam": [
+  0,
+  -16.8,
+  10.399999999999999
+ ],
+ "panLimit": 90,
+ "tiltLimit": 45
+}

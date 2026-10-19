@@ -1,0 +1,16 @@
+{
+    "type": "process",
+    "name": "Gimbal 0.20mm Strong @BBL A1",
+    "inherits": "0.20mm Standard @BBL A1",
+    "from": "User",
+    "instantiation": "true",
+    "wall_loops": "4",
+    "top_shell_layers": "5",
+    "bottom_shell_layers": "5",
+    "sparse_infill_density": "25%",
+    "sparse_infill_pattern": "grid",
+    "enable_support": "0",
+    "thick_bridges": "1",
+    "brim_type": "auto_brim",
+    "compatible_printers": ["Bambu Lab A1 0.4 nozzle"]
+}
