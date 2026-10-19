@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "device_status.schema.json",
+  "title": "GET /v1/status data: live health and state",
+  "type": "object",
+  "required": ["device_id", "observed_at", "connection", "health", "state", "faults"],
+  "properties": {
+    "device_id": {"$ref": "common.schema.json#/$defs/id"},
+    "observed_at": {"$ref": "common.schema.json#/$defs/timestamp",
+      "description": "When the hardware telemetry in this status was read, NOT when the response was built."},
+    "connection": {"enum": ["online", "degraded", "offline"],
+      "description": "Service-to-hardware link. offline = service up, hardware unreachable."},
+    "health": {"enum": ["ok", "warning", "fault"]},
+    "state": {"enum": ["idle", "moving", "tracking", "surveying", "mission", "estopped", "calibrating", "disabled", "unknown"]},
+    "calibrated": {"type": "boolean"},
+    "estop": {"type": "boolean"},
+    "motors_enabled": {"type": "boolean"},
+    "faults": {"type": "array", "items": {"type": "object", "required": ["code", "message"],
+      "properties": {"code": {"type": "string"}, "message": {"type": "string"},
+                     "since": {"$ref": "common.schema.json#/$defs/timestamp"}}}},
+    "pose": {"oneOf": [{"$ref": "common.schema.json#/$defs/gimbal_pose"}, {"$ref": "common.schema.json#/$defs/pose_3d"}],
+      "description": "Only when actually measured."},
+    "limits": {"type": "object", "description": "Gimbal: {pan_deg:[lo,hi], tilt_deg:[lo,hi]}; mobile: {max_speed_mps, geofence_id}"},
+    "battery": {"type": "object", "properties": {"voltage_v": {"type": "number"}, "percent": {"type": "number"}},
+      "description": "Omit unless a sensor measures it."},
+    "active_operation_ids": {"type": "array", "items": {"type": "string"}},
+    "extra": {"type": "object"}
+  }
+}

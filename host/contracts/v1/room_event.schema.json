@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "room_event.schema.json",
+  "title": "Something that happened, with the evidence for it",
+  "type": "object",
+  "required": ["event_id", "type", "t", "device_id", "confirmed", "inferred", "evidence"],
+  "properties": {
+    "schema_version": {"$ref": "common.schema.json#/$defs/schema_version"},
+    "event_id": {"$ref": "common.schema.json#/$defs/id"},
+    "type": {"enum": ["presence_started", "presence_ended", "room_entry", "room_exit",
+                      "tracking_started", "tracking_stopped", "gimbal_moved",
+                      "survey_started", "survey_completed", "survey_failed",
+                      "mission_started", "mission_progress", "mission_completed", "mission_failed",
+                      "obstacle_detected", "estop", "link_lost", "link_restored",
+                      "device_fault", "device_online", "device_offline", "observation_gap"]},
+    "t": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "t_end": {"$ref": "common.schema.json#/$defs/timestamp", "description": "For events with duration (observation_gap)."},
+    "device_id": {"$ref": "common.schema.json#/$defs/id"},
+    "sensor_id": {"type": "string"},
+    "confirmed": {"type": "boolean",
+      "description": "room_entry/room_exit need confirmed=true backed by doorway-crossing evidence. presence_ended is NEVER an exit."},
+    "inferred": {"type": "boolean", "description": "true if derived by the platform/model, false if reported by the device."},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "evidence": {"type": "object", "required": ["method"],
+      "properties": {"method": {"enum": ["detector_presence", "doorway_crossing", "device_report", "operation_result",
+                                         "lidar", "heartbeat", "platform"]},
+                     "observation_ids": {"type": "array", "items": {"type": "string"}}}},
+    "data": {"type": "object"}
+  }
+}

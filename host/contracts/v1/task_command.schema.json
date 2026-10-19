@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "task_command.schema.json",
+  "title": "POST /v1/commands body: one high-level goal for a device",
+  "type": "object",
+  "required": ["schema_version", "request_id", "operation", "args"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"$ref": "common.schema.json#/$defs/schema_version"},
+    "request_id": {"$ref": "common.schema.json#/$defs/id",
+      "description": "Client-unique. Device MUST return the original result for a repeated request_id (10 min window) and not execute twice."},
+    "operation": {"type": "string", "pattern": "^[a-z_]+\\.[a-z_]+$"},
+    "args": {"type": "object"},
+    "deadline_s": {"type": "number", "exclusiveMinimum": 0, "maximum": 600,
+      "description": "Device cancels the operation itself if not finished in this many seconds."},
+    "issued_at": {"$ref": "common.schema.json#/$defs/timestamp"},
+    "issued_by": {"type": "string"}
+  }
+}

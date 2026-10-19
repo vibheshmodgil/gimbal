@@ -1,26 +1,32 @@
-"""Device logic: validation, operations (move / home / survey), stop, observations, events, health.
+"""Device logic: validation, operations (move / home / motors / survey), stop, observations, events, health.
+
+Shapes follow the canonical Robotics Device API v1 (vendored in contracts/v1, see contracts/v1/SOURCE.md).
 
 Everything physical goes through the firmware, which keeps its own soft limits, servo-reach clamp, speed cap and
 laser timer. This layer adds what the firmware can't know: request validation (reject, never silently clamp),
 one motion operation at a time, acceptance vs completion, timeouts, cancellation and timestamped observations.
 
-The servos are open-loop hobby servos: "completed" means the firmware's commanded trajectory finished and the
-settle time passed, never that the head was measured there. Every pose says so (source + physically_verified).
+The servos are open-loop hobby servos: "succeeded" means the firmware's commanded trajectory finished and the
+settle time passed (outcome "commanded_reached"), never that the head was measured there.
 """
 import hashlib, math, os, threading, time, uuid
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 
-CONTRACT = "anvyxo-device-proposal/0.1"   # until the orchestrator's canonical contract exists (docs/INTEGRATION.md)
+SCHEMA_VERSION = "1.0"
+SOFTWARE_VERSION = "gimbal_service 1.0"
 RESOLUTIONS = ["320x240", "400x296", "480x320", "640x480", "800x600", "1024x768", "1280x720", "1280x1024", "1600x1200"]
 POSE_SOURCE = "firmware_commanded_open_loop"
 EXPOSURE_MARGIN_S = 0.15   # latency jitter: a frame counts as "at rest" only if the head was still this much longer
+IDEMPOTENCY_S = 600        # a repeated request_id returns the original operation for 10 min
+EVENT_RETENTION_S = 24 * 3600
+DETECTIONS_FRESH_S = 10.0  # advertise perception.detections only while the tracker fed us this recently
 REJECTED_EVENT_TYPES = {"perception.entry_candidate", "perception.entry_confirmed", "perception.exit_candidate",
                         "perception.exit_confirmed"}   # reserved: needs doorway coverage + a classifier (perception.py)
+RETRYABLE = {"BUSY", "OFFLINE", "LINK_LOST", "CAMERA_UNAVAILABLE", "FRAME_STALE", "FRAME_TIMEOUT", "TIMEOUT", "MOTION_TIMEOUT",
+             "COMMAND_NOT_ACKNOWLEDGED", "CALIBRATION_IN_PROGRESS", "UNAVAILABLE"}
 
 
-def iso(t): return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 def new_id(prefix): return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
 
@@ -64,28 +70,40 @@ class Config:
 
 
 class ApiError(Exception):
-    def __init__(self, http, code, message, **details):
+    """Canonical error. reason = the specific cause when the canonical code is generic (e.g. unknown_field)."""
+    def __init__(self, http, code, message, reason=None, **details):
         super().__init__(message)
-        self.http, self.code, self.message, self.details = http, code, message, details
+        self.http, self.code, self.message = http, code, message
+        self.details = {**({"reason": reason} if reason else {}), **details}
 
-    def body(self, request_id=None):
-        return {"error": {"code": self.code, "message": self.message, "details": self.details, "request_id": request_id}}
+    def err(self): return err(self.code, self.message, **self.details)
+
+
+def err(code, message, **details):
+    return {"code": code, "message": message, "retryable": code in RETRYABLE, "details": details}
 
 
 def num(d, key, default=None, lo=None, hi=None):
     v = d.get(key, default)
-    if v is None: raise ApiError(422, "INVALID_ARGUMENT", f"'{key}' is required")
+    if v is None: raise ApiError(422, "INVALID_ARGUMENT", f"'{key}' is required", "missing_field", field=key)
     if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
-        raise ApiError(422, "INVALID_ARGUMENT", f"'{key}' must be a finite number", field=key)
+        raise ApiError(422, "INVALID_ARGUMENT", f"'{key}' must be a finite number", "not_a_number", field=key)
     if (lo is not None and v < lo) or (hi is not None and v > hi):
-        raise ApiError(422, "OUT_OF_RANGE", f"'{key}'={v} outside {lo}..{hi}", field=key, min=lo, max=hi)
+        raise ApiError(422, "OUT_OF_RANGE", f"'{key}'={v} outside {lo}..{hi}", "argument_range", field=key, min=lo, max=hi)
     return float(v)
+
+
+def flag(d, key, default=False):
+    v = d.get(key, default)
+    if not isinstance(v, bool): raise ApiError(422, "INVALID_ARGUMENT", f"'{key}' must be true/false", "not_a_boolean", field=key)
+    return v
 
 
 def only(d, *keys):
     """Reject unknown fields: a typo must fail loudly, not run with defaults."""
+    if not isinstance(d, dict): raise ApiError(422, "INVALID_ARGUMENT", "args must be a JSON object", "not_an_object")
     extra = sorted(set(d) - set(keys) - {"request_id"})
-    if extra: raise ApiError(422, "UNKNOWN_FIELD", f"unknown field(s) {extra}", allowed=sorted(keys))
+    if extra: raise ApiError(422, "INVALID_ARGUMENT", f"unknown field(s) {extra}", "unknown_field", fields=extra, allowed=sorted(keys))
     return d
 
 
@@ -101,14 +119,15 @@ def jpeg_size(jpg):
 
 
 class EventBus:
+    """Internal, fine-grained events (operation.*, device.state ...): the optional SSE stream. Room events are separate."""
     def __init__(self, device_id, keep=1000):
         self.device_id, self.seq, self.ring, self.cond = device_id, 0, deque(maxlen=keep), threading.Condition()
 
     def publish(self, type_, data, severity="info"):
         with self.cond:
             self.seq += 1
-            ev = {"schema": "event/v0", "event_id": new_id("evt"), "seq": self.seq, "type": type_, "time": iso(time.time()),
-                  "device_id": self.device_id, "severity": severity, "data": data}
+            ev = {"event_id": new_id("evt"), "seq": self.seq, "type": type_, "t": time.time(), "device_id": self.device_id,
+                  "severity": severity, "data": data}
             self.ring.append(ev)
             self.cond.notify_all()
         return ev
@@ -119,49 +138,79 @@ class EventBus:
             return [e for e in self.ring if e["seq"] > seq]
 
 
+# ------------------------------------------------------------------ operation args (advertised in /v1/info, enforced here)
+_NUM = {"type": "number"}
+OPERATION_ARGS = {
+    "gimbal.move": {"type": "object", "additionalProperties": False, "required": ["pan_deg", "tilt_deg"],
+                    "properties": {"mode": {"enum": ["absolute", "relative"], "default": "absolute"}, "pan_deg": _NUM, "tilt_deg": _NUM,
+                                   "speed_dps": {"type": "number", "minimum": 10}, "preempt": {"type": "boolean"}}},
+    "gimbal.home": {"type": "object", "additionalProperties": False,
+                    "properties": {"speed_dps": {"type": "number", "minimum": 10}, "preempt": {"type": "boolean"}}},
+    "gimbal.stop": {"type": "object", "additionalProperties": False, "properties": {}},
+    "gimbal.motors": {"type": "object", "additionalProperties": False, "required": ["enabled"], "properties": {"enabled": {"type": "boolean"}}},
+    "survey.visual": {"type": "object", "additionalProperties": False, "required": ["pan_from_deg", "pan_to_deg", "step_deg"],
+                      "properties": {"pan_from_deg": _NUM, "pan_to_deg": _NUM, "step_deg": {"type": "number", "minimum": 1, "maximum": 180},
+                                     "tilt_deg": _NUM, "tilts_deg": {"type": "array", "items": _NUM, "minItems": 1},
+                                     "restore": {"enum": ["previous", "home", "none"], "default": "previous"},
+                                     "settle_s": {"type": "number"}, "speed_dps": {"type": "number", "minimum": 10}, "preempt": {"type": "boolean"}}},
+}
+
+
 @dataclass
 class Operation:
-    kind: str
+    operation: str                   # canonical name, e.g. "gimbal.move"
     params: dict
     request_id: str
+    device_id: str
     operation_id: str = field(default_factory=lambda: new_id("op"))
-    state: str = "accepted"          # accepted -> running -> succeeded | failed | cancelled | preempted
+    state: str = "accepted"          # accepted -> running -> succeeded | failed | cancelled | preempted | timed_out
     created_at: float = field(default_factory=time.time)
-    started_at: float = None
+    updated_at: float = field(default_factory=time.time)
     device_ack_at: float = None      # firmware echoed the new target (command accepted by the DEVICE)
-    ended_at: float = None
-    progress: dict = field(default_factory=dict)
-    result: dict = None
+    commanded: bool = False          # a motion command left this host (so "nothing happened" can no longer be claimed)
+    deadline: float = None           # absolute host time from deadline_s
+    progress: float = 0.0
+    result: dict = field(default_factory=dict)
     error: dict = None
+    observation_ids: list = field(default_factory=list)
     cancel: threading.Event = field(default_factory=threading.Event)
     cancel_reason: str = ""
 
     @property
     def active(self): return self.state in ("accepted", "running")
 
+    def set(self, **kw):
+        for k, v in kw.items(): setattr(self, k, v)
+        self.updated_at = time.time()
+
     def to_dict(self):
-        t = lambda v: v and iso(v)
-        return {"schema": "operation/v0", "operation_id": self.operation_id, "request_id": self.request_id, "kind": self.kind,
-                "state": self.state, "params": self.params, "created_at": t(self.created_at), "started_at": t(self.started_at),
-                "device_ack_at": t(self.device_ack_at), "ended_at": t(self.ended_at), "progress": self.progress,
-                "result": self.result, "error": self.error,
-                "completion_evidence": "commanded trajectory finished + settle time (open loop, no position sensor)"}
+        """operation_result.schema.json"""
+        outcome = ("commanded_reached" if self.state == "succeeded" else "unconfirmed" if self.commanded or self.device_ack_at else "none")
+        d = {"operation_id": self.operation_id, "request_id": self.request_id, "device_id": self.device_id, "operation": self.operation,
+             "state": self.state, "outcome": outcome, "progress": round(self.progress, 3), "result": {"params": self.params, **self.result},
+             "error": self.error, "observation_ids": list(self.observation_ids), "created_at": self.created_at, "updated_at": self.updated_at}
+        if self.device_ack_at: d["device_ack_at"] = self.device_ack_at
+        return d
 
 
 class _OpEnd(Exception):
-    def __init__(self, state, code=None, message=""):
-        super().__init__(message); self.state, self.code, self.message = state, code, message
+    def __init__(self, state, code=None, message="", **details):
+        super().__init__(message); self.state, self.code, self.message, self.details = state, code, message, details
 
 
 class Device:
     def __init__(self, cfg, link):
         self.cfg, self.link = cfg, link
         self.bus = EventBus(cfg.device_id)
+        self.room, self.room_lock = deque(maxlen=20000), threading.Lock()     # room_event.schema.json, kept 24 h
         self.ops, self.active, self.lock = OrderedDict(), None, threading.Lock()
+        self.by_request = {}                                                 # request_id -> (time, operation_id)
         self.obs, self.obs_lock = OrderedDict(), threading.Lock()
-        self.hist = deque(maxlen=200)                       # (t, pan, tilt, tp, tt) for pose-at-exposure
+        self.detections, self.detections_t = None, 0.0                       # newest tracker detections observation
+        self.hist = deque(maxlen=200)                                        # (t, pan, tilt, tp, tt) for pose-at-exposure
         self.presence = {"state": "unknown", "since": None, "source": None}
-        self.sensor_id, self.frame_id = f"{cfg.device_id}/camera0", f"{cfg.device_id}/pan_tilt_base"
+        self.sensor_id = f"{cfg.device_id}/camera0"
+        self.frame_id, self.cam_frame_id = f"{cfg.device_id}/pan_tilt_base", f"{cfg.device_id}/camera_optical"
         self._closing = False
         if cfg.persist_dir: os.makedirs(cfg.persist_dir, exist_ok=True)
         threading.Thread(target=self._monitor, daemon=True, name="device-monitor").start()
@@ -185,7 +234,7 @@ class Device:
     def faults(self):
         st, f = self._st(), []
         add = lambda code, sev, msg: f.append({"code": code, "severity": sev, "message": msg})
-        if not self.link.connected: add("DEVICE_DISCONNECTED", "error", f"no WebSocket to firmware at {self.link.host}")
+        if not self.link.connected: add("OFFLINE", "error", f"no WebSocket to firmware at {self.link.host}")
         elif not self.status_fresh(): add("STATUS_STALE", "error", "firmware status older than %.1f s" % self.cfg.status_stale_s)
         cam = self.camera_status()
         if not cam["ready"]: add("CAMERA_UNAVAILABLE", "error", cam["stream"]["error"] or "no fresh frame")
@@ -202,33 +251,39 @@ class Device:
         return [x["code"] for x in self.faults() if x["severity"] == "error" and (include_camera or x["code"] != "CAMERA_UNAVAILABLE")]
 
     def pose(self, st=None):
+        """common.schema.json gimbal_pose (+ target/moving extras)."""
         st = st or self._st()
         if "pan" not in st: return None
         moving = abs(st["pan"] - st["tp"]) > 0.15 or abs(st["tilt"] - st["tt"]) > 0.15
         return {"frame_id": self.frame_id, "representation": "pan_tilt_relative", "pan_deg": st["pan"], "tilt_deg": st["tilt"],
-                "target_pan_deg": st["tp"], "target_tilt_deg": st["tt"], "moving": moving, "source": POSE_SOURCE,
-                "physically_verified": False}
+                "source": POSE_SOURCE, "physically_verified": False, "target_pan_deg": st["tp"], "target_tilt_deg": st["tt"], "moving": moving}
 
     def status(self):
-        st, now, cal = self._st(), time.time(), self.cfg
-        lim = self.limits()
-        return {"schema": "device_status/v0", "device_id": cal.device_id, "device_type": "pan_tilt_camera", "time": iso(now),
-                "connection": {"state": "connected" if self.link.connected else "disconnected", "host": self.link.host,
-                               "last_status_at": iso(self.link.status_t) if self.link.status_t else None,
-                               "status_age_ms": round((now - self.link.status_t) * 1000) if self.link.status_t else None},
-                "ready": not self.ready_reasons(), "not_ready_reasons": self.ready_reasons(),
-                "calibration": {"calibrated": st.get("cal"), "in_progress": st.get("calOn"),
-                                "direction_reversed": {"pan": st.get("invP"), "tilt": st.get("invT")},
-                                "uncalibrated_motion_allowed": cal.allow_uncalibrated},
-                "pose": self.pose(st),
-                "limits": {"pan_deg": lim["pan"], "tilt_deg": lim["tilt"], "soft_pan_deg": st.get("lp"), "soft_tilt_deg": st.get("lt"),
-                           "servo_reach_pan_deg": st.get("rp"), "servo_reach_tilt_deg": st.get("rt"), "max_speed_dps": cal.max_speed_dps,
-                           "acceleration_limited": False},
-                "motion": {"firmware_mode": st.get("mode"), "speed_dps": st.get("speed"),
-                           "motors_enabled": {"pan": st.get("panEn"), "tilt": st.get("tiltEn")},
-                           "active_operation_id": self.active.operation_id if self.active and self.active.active else None},
-                "laser": {"on": st.get("laser"), "controlled_by": "tracker/UI (not exposed by this API)"},
-                "presence": self.presence, "camera": self.camera_status(), "faults": self.faults()}
+        """device_status.schema.json"""
+        st, cfg = self._st(), self.cfg
+        faults, pose, lim = self.faults(), self.pose(st), self.limits()
+        errs = [x for x in faults if x["severity"] == "error"]
+        cam_down = any(x["code"] == "CAMERA_UNAVAILABLE" for x in errs)
+        act = self.active if self.active and self.active.active else None
+        state = ("unknown" if not st else "calibrating" if st.get("calOn") else
+                 "disabled" if st.get("panEn") is False or st.get("tiltEn") is False else
+                 "surveying" if act and act.operation == "survey.visual" else "moving" if act or (pose and pose["moving"]) else "idle")
+        d = {"device_id": cfg.device_id, "observed_at": self.link.status_t or 0.0,
+             "connection": "offline" if not self.status_fresh() else "degraded" if cam_down else "online",
+             "health": "fault" if errs else "warning" if faults else "ok", "state": state,
+             "calibrated": bool(st.get("cal")), "motors_enabled": bool(st.get("panEn") and st.get("tiltEn")),
+             "faults": faults, "limits": {"pan_deg": lim["pan"], "tilt_deg": lim["tilt"]},
+             "active_operation_ids": [act.operation_id] if act else [],
+             "extra": {"ready": not self.ready_reasons(), "not_ready_reasons": self.ready_reasons(), "host": self.link.host,
+                       "calibration": {"in_progress": st.get("calOn"), "direction_reversed": {"pan": st.get("invP"), "tilt": st.get("invT")},
+                                       "uncalibrated_motion_allowed": cfg.allow_uncalibrated},
+                       "limits_detail": {"soft_pan_deg": st.get("lp"), "soft_tilt_deg": st.get("lt"), "servo_reach_pan_deg": st.get("rp"),
+                                         "servo_reach_tilt_deg": st.get("rt"), "cad_cap_deg": [cfg.pan_limit_deg, cfg.tilt_limit_deg],
+                                         "max_speed_dps": cfg.max_speed_dps, "acceleration_limited": False},
+                       "firmware_mode": st.get("mode"), "speed_dps": st.get("speed"), "laser_on": st.get("laser"),
+                       "presence": self.presence, "camera": self.camera_status()}}
+        if pose: d["pose"] = pose
+        return d
 
     def camera_status(self):
         jpg, t, seq = self.link.frame()
@@ -237,126 +292,185 @@ class Device:
         fresh = jpg is not None and age < self.cfg.frame_stale_s
         w, h = jpeg_size(jpg) if jpg else (None, None)
         res = cam.get("res")
-        return {"sensor_id": self.sensor_id, "sensor_type": "camera.rgb", "model": cam.get("sensor"), "ready": bool(self.link.stream_ok and fresh),
+        return {"sensor_id": self.sensor_id, "sensor_type": "camera", "frame_id": self.cam_frame_id, "model": cam.get("sensor"),
+                "ready": bool(self.link.stream_ok and fresh),
                 "stream": {"connected": bool(self.link.stream_ok), "error": self.link.stream_err or None, "fps": round(self.link.fps, 1),
                            "path": "/v1/camera/stream", "encoding": "image/jpeg (MJPEG, frames re-served unchanged)"},
-                "last_frame_at": iso(t) if jpg else None, "frame_age_ms": round(age * 1000) if age is not None else None,
+                "last_frame_received_at": t if jpg else None, "frame_age_s": round(age, 3) if age is not None else None,
                 "stale": not fresh, "frame_seq": seq, "width": w, "height": h,
                 "config": {"resolution_index": res, "resolution": RESOLUTIONS[res] if isinstance(res, int) and 0 <= res < len(RESOLUTIONS) else None,
                            "fps_cap": cam.get("fps"), "jpeg_quality": cam.get("q")},
-                "timing": {"timestamp_source": "host_receive_time", "estimated_capture_latency_s": self.cfg.camera_latency_s},
+                "timing": {"timestamp_source": "host_receive_minus_latency", "estimated": True, "latency_s": self.cfg.camera_latency_s},
                 "intrinsics": {"calibration_ref": None, "hfov_deg": self.cfg.hfov_deg or None, "vfov_deg": self.cfg.vfov_deg or None,
                                "note": "FOV measured by motion test; no lens intrinsics/distortion calibration exists"}}
 
+    # ------------------------------------------------------------------ commands (POST /v1/commands)
+    def command(self, body):
+        """task_command.schema.json -> (Operation, http_status)."""
+        only(body, "schema_version", "operation", "args", "deadline_s", "issued_at", "issued_by")
+        sv = body.get("schema_version")
+        if not isinstance(sv, str) or sv.split(".")[0] != "1":
+            raise ApiError(400, "VERSION_MISMATCH", f"schema_version {sv!r}: this device speaks 1.x")
+        rid, name, args = body.get("request_id"), body.get("operation"), body.get("args")
+        if not isinstance(rid, str) or not 1 <= len(rid) <= 64:
+            raise ApiError(422, "INVALID_ARGUMENT", "request_id (1..64 chars) is required", "missing_field", field="request_id")
+        if not isinstance(name, str): raise ApiError(422, "INVALID_ARGUMENT", "operation is required", "missing_field", field="operation")
+        if not isinstance(args, dict): raise ApiError(422, "INVALID_ARGUMENT", "args must be an object", "not_an_object", field="args")
+        deadline = num(body, "deadline_s", lo=0.001, hi=600) if body.get("deadline_s") is not None else None
+        handlers = {"gimbal.move": self.move, "gimbal.home": self.home, "survey.visual": self.survey, "gimbal.motors": self.motors}
+        if name not in handlers and name != "gimbal.stop":
+            raise ApiError(400, "UNSUPPORTED", f"operation {name!r} not supported", supported=sorted(OPERATION_ARGS))
+        prior = self.replay(rid)
+        if prior: return prior, 200
+        if name == "gimbal.stop":
+            only(args)
+            op = self.stop(rid)
+        else:
+            op = handlers[name](args, rid, deadline)
+        return op, 202 if op.active else 200
+
+    def replay(self, rid):
+        now = time.time()
+        for k in [k for k, (t, _) in self.by_request.items() if now - t > IDEMPOTENCY_S]: del self.by_request[k]
+        hit = self.by_request.get(rid)
+        return self.ops.get(hit[1]) if hit else None
+
     # ------------------------------------------------------------------ operations
     def _require_motion_ready(self):
-        if not self.status_fresh(): raise ApiError(503, "DEVICE_UNAVAILABLE", "gimbal firmware not connected or status stale")
+        if not self.status_fresh(): raise ApiError(503, "OFFLINE", "gimbal firmware not connected or status stale")
         bad = self.ready_reasons(include_camera=False)   # moving doesn't need the camera
-        if bad:
-            raise ApiError(409, bad[0], "gimbal not ready for motion: " + ", ".join(bad), reasons=bad)
+        if bad: raise ApiError(409, bad[0], "gimbal not ready for motion: " + ", ".join(bad), reasons=bad)
 
     def _check_target(self, pan, tilt):
         lim = self.limits()
         for ax, v in (("pan", pan), ("tilt", tilt)):
             lo, hi = lim[ax]
             if not lo - 1e-6 <= v <= hi + 1e-6:
-                raise ApiError(422, "OUT_OF_LIMITS", f"{ax} {v:.2f} deg outside allowed {lo:.1f}..{hi:.1f} deg", axis=ax, min=lo, max=hi)
+                raise ApiError(422, "OUT_OF_RANGE", f"{ax} {v:.2f} deg outside allowed {lo:.1f}..{hi:.1f} deg", "out_of_limits", axis=ax, min=lo, max=hi)
 
     def _speed(self, d):
         return num(d, "speed_dps", self.cfg.default_speed_dps, 10.0, self.cfg.max_speed_dps)
 
-    def move(self, d, request_id):
+    def move(self, d, request_id, deadline=None):
         only(d, "mode", "pan_deg", "tilt_deg", "speed_dps", "preempt")
-        self._require_motion_ready()
+        if (prior := self.replay(request_id)): return prior
         mode = d.get("mode", "absolute")
-        if mode not in ("absolute", "relative"): raise ApiError(422, "INVALID_ARGUMENT", "mode must be absolute|relative", field="mode")
-        st, speed = self._st(), self._speed(d)
+        if mode not in ("absolute", "relative"): raise ApiError(422, "INVALID_ARGUMENT", "mode must be absolute|relative", "bad_enum", field="mode")
+        speed, preempt = self._speed(d), flag(d, "preempt")
         dp, dt = num(d, "pan_deg", 0.0 if mode == "relative" else None), num(d, "tilt_deg", 0.0 if mode == "relative" else None)
+        self._require_motion_ready()
+        st = self._st()
         pan, tilt = (st["tp"] + dp, st["tt"] + dt) if mode == "relative" else (dp, dt)
         self._check_target(pan, tilt)
         params = {"mode": mode, "pan_deg": dp, "tilt_deg": dt, "target_pan_deg": pan, "target_tilt_deg": tilt, "speed_dps": speed}
-        return self._start("move", params, request_id, d.get("preempt", False), lambda op: self._run_move(op, pan, tilt, speed))
+        return self._start("gimbal.move", params, request_id, preempt, deadline, lambda op: self._run_move(op, pan, tilt, speed))
 
-    def home(self, d, request_id):
+    def home(self, d, request_id, deadline=None):
         only(d, "speed_dps", "preempt")
+        if (prior := self.replay(request_id)): return prior
+        speed, preempt = self._speed(d), flag(d, "preempt")
         self._require_motion_ready()
-        speed = self._speed(d)
         self._check_target(0.0, 0.0)
-        return self._start("home", {"target_pan_deg": 0.0, "target_tilt_deg": 0.0, "speed_dps": speed, "home": "calibrated zero"},
-                           request_id, d.get("preempt", False), lambda op: self._run_move(op, 0.0, 0.0, speed))
+        return self._start("gimbal.home", {"target_pan_deg": 0.0, "target_tilt_deg": 0.0, "speed_dps": speed, "home": "calibrated zero"},
+                           request_id, preempt, deadline, lambda op: self._run_move(op, 0.0, 0.0, speed))
 
-    def survey(self, d, request_id):
-        only(d, "waypoints", "grid", "restore", "speed_dps", "settle_s", "preempt")
-        if "grid" in d: only(d["grid"] if isinstance(d["grid"], dict) else {}, "pan_from_deg", "pan_to_deg", "pan_step_deg", "tilts_deg")
+    def survey(self, d, request_id, deadline=None):
+        only(d, "pan_from_deg", "pan_to_deg", "step_deg", "tilt_deg", "tilts_deg", "restore", "settle_s", "speed_dps", "preempt")
+        if (prior := self.replay(request_id)): return prior
+        a, b = num(d, "pan_from_deg"), num(d, "pan_to_deg")
+        step = num(d, "step_deg", None, 1.0, 180.0)
+        if "tilts_deg" in d and "tilt_deg" in d: raise ApiError(422, "INVALID_ARGUMENT", "give tilt_deg or tilts_deg, not both", "conflicting_fields")
+        tilts = d.get("tilts_deg", [d.get("tilt_deg", 0.0)])
+        if not isinstance(tilts, list) or not tilts: raise ApiError(422, "INVALID_ARGUMENT", "tilts_deg must be a non-empty list", "bad_list")
+        tilts = [num({"tilt_deg": t}, "tilt_deg") for t in tilts]
+        n = int(abs(b - a) // step) + 1
+        pans = [a + math.copysign(step, b - a) * i for i in range(n)]
+        pts = [[p, t] for k, t in enumerate(tilts) for p in (pans if k % 2 == 0 else pans[::-1])]   # serpentine
+        if len(pts) > self.cfg.survey_max_points:
+            raise ApiError(422, "OUT_OF_RANGE", f"{len(pts)} views > max {self.cfg.survey_max_points}", "too_many_views", max=self.cfg.survey_max_points)
+        restore = d.get("restore", "previous")
+        if restore not in ("none", "previous", "home"): raise ApiError(422, "INVALID_ARGUMENT", "restore must be none|previous|home", "bad_enum")
+        speed, preempt = self._speed(d), flag(d, "preempt")
+        settle = num(d, "settle_s", self.cfg.survey_settle_s, self.cfg.camera_latency_s, 10.0)
+        for p, t in pts: self._check_target(p, t)
+        if restore == "home": self._check_target(0.0, 0.0)
         self._require_motion_ready()
         if not self.camera_status()["ready"]: raise ApiError(409, "CAMERA_UNAVAILABLE", "camera has no fresh frames")
-        pts = d.get("waypoints")
-        if pts is None:   # grid: pan from..to step, at each tilt
-            g = d.get("grid") or {}
-            a, b = num(g, "pan_from_deg"), num(g, "pan_to_deg")
-            step = num(g, "pan_step_deg", 20.0, 1.0, 180.0)
-            tilts = g.get("tilts_deg", [0.0])
-            if not isinstance(tilts, list) or not tilts: raise ApiError(422, "INVALID_ARGUMENT", "grid.tilts_deg must be a non-empty list")
-            n = int(abs(b - a) // step) + 1
-            pans = [a + math.copysign(step, b - a) * i for i in range(n)]
-            pts = [[p, num({"t": t}, "t")] for k, t in enumerate(tilts) for p in (pans if k % 2 == 0 else pans[::-1])]   # serpentine
-        if not isinstance(pts, list) or not pts: raise ApiError(422, "INVALID_ARGUMENT", "waypoints must be a non-empty list of [pan, tilt]")
-        if len(pts) > self.cfg.survey_max_points:
-            raise ApiError(422, "OUT_OF_RANGE", f"{len(pts)} waypoints > max {self.cfg.survey_max_points}", max=self.cfg.survey_max_points)
-        clean = []
-        for i, p in enumerate(pts):
-            if not (isinstance(p, (list, tuple)) and len(p) == 2): raise ApiError(422, "INVALID_ARGUMENT", f"waypoint {i} must be [pan, tilt]")
-            pan, tilt = num({"p": p[0]}, "p"), num({"t": p[1]}, "t")
-            self._check_target(pan, tilt)
-            clean.append([pan, tilt])
-        restore = d.get("restore", "previous")
-        if restore not in ("none", "previous", "home"): raise ApiError(422, "INVALID_ARGUMENT", "restore must be none|previous|home")
-        if restore == "home": self._check_target(0.0, 0.0)
-        speed, settle = self._speed(d), num(d, "settle_s", self.cfg.survey_settle_s, self.cfg.camera_latency_s, 10.0)
-        params = {"waypoints": clean, "speed_dps": speed, "settle_s": settle, "restore": restore}
-        return self._start("survey", params, request_id, d.get("preempt", False), lambda op: self._run_survey(op, clean, speed, settle, restore))
+        params = {"pan_from_deg": a, "pan_to_deg": b, "step_deg": step, "tilts_deg": tilts, "waypoints": pts, "speed_dps": speed,
+                  "settle_s": settle, "restore": restore}
+        return self._start("survey.visual", params, request_id, preempt, deadline, lambda op: self._run_survey(op, pts, speed, settle, restore))
 
-    def _start(self, kind, params, request_id, preempt, runner):
-        if not isinstance(preempt, bool): raise ApiError(422, "INVALID_ARGUMENT", "preempt must be true/false")
+    def motors(self, d, request_id, deadline=None):
+        """Servo signal on/off. Off = limp (also ends our motion op); servos otherwise hold torque, there is no auto-relax."""
+        only(d, "enabled")
+        if (prior := self.replay(request_id)): return prior
+        on = flag(d, "enabled", None) if "enabled" in d else None
+        if on is None: raise ApiError(422, "INVALID_ARGUMENT", "'enabled' is required", "missing_field", field="enabled")
+        if not self.status_fresh(): raise ApiError(503, "OFFLINE", "gimbal firmware not connected or status stale")
+        if not on and self.active and self.active.active: self.stop(request_id + ":motors_off")
+        op = self._record(Operation("gimbal.motors", {"enabled": on}, request_id, self.cfg.device_id))
+        t_send = time.time()
+        op.commanded = True
+        if not (self.link.send(f"SRV:P,{int(on)}") and self.link.send(f"SRV:T,{int(on)}")):
+            op.set(state="failed", error=err("LINK_LOST", "could not send to firmware")); return op
+        end = time.time() + self.cfg.ack_timeout_s
+        while time.time() < end:
+            st = self._st()
+            if self.link.status_t > t_send and st.get("panEn") is on and st.get("tiltEn") is on:
+                op.set(state="succeeded", device_ack_at=time.time(), progress=1.0, result={"motors_enabled": on}); break
+            time.sleep(0.02)
+        else:
+            op.set(state="failed", error=err("COMMAND_NOT_ACKNOWLEDGED", "firmware status never showed the motor change"))
+        self._emit("operation." + op.state, op.to_dict())
+        return op
+
+    def _record(self, op):
+        with self.lock:
+            self.ops[op.operation_id] = op
+            while len(self.ops) > 200: self.ops.popitem(last=False)
+            self.by_request[op.request_id] = (time.time(), op.operation_id)
+        return op
+
+    def _start(self, name, params, request_id, preempt, deadline, runner):
         with self.lock:
             old = self.active
             if old and old.active:
                 if not preempt:
-                    raise ApiError(409, "BUSY", f"operation {old.operation_id} ({old.kind}) is still {old.state}; stop it or send preempt=true",
+                    raise ApiError(409, "BUSY", f"operation {old.operation_id} ({old.operation}) is still {old.state}; stop it or send preempt=true",
                                    active_operation_id=old.operation_id)
                 old.cancel_reason = "preempted"; old.cancel.set()
-            op = Operation(kind, params, request_id)
-            self.ops[op.operation_id] = op
-            while len(self.ops) > 200: self.ops.popitem(last=False)
+            op = Operation(name, params, request_id, self.cfg.device_id, deadline=time.time() + deadline if deadline else None)
             self.active = op
+        self._record(op)
         if old and old.active:
             for _ in range(100):                # the old runner stops at its next check (<= 20 ms)
                 if not old.active: break
                 time.sleep(0.02)
-        self.bus.publish("operation.accepted", op.to_dict())
+        self._emit("operation.accepted", op.to_dict())
         threading.Thread(target=self._run, args=(op, runner), daemon=True, name=f"op-{op.operation_id}").start()
         return op
 
     def _run(self, op, runner):
-        op.state, op.started_at = "running", time.time()
-        self.bus.publish("operation.started", {"operation_id": op.operation_id, "kind": op.kind})
+        op.set(state="running")
+        self._emit("operation.started", {"operation_id": op.operation_id, "operation": op.operation})
         try:
-            op.result = runner(op)
-            op.state = "succeeded"
+            op.result.update(runner(op) or {})
+            op.set(state="succeeded", progress=1.0)
         except _OpEnd as e:
-            op.state = e.state
-            if e.code: op.error = {"code": e.code, "message": e.message}
+            op.set(state=e.state, error=err(e.code, e.message, **e.details) if e.code else None)
         except Exception as e:   # bug or link exception: never leave an operation "running"
-            op.state, op.error = "failed", {"code": "INTERNAL_ERROR", "message": str(e)[:200]}
-        op.ended_at = time.time()
+            op.set(state="failed", error=err("INTERNAL", str(e)[:200]))
         sev = "info" if op.state == "succeeded" else "warning" if op.state in ("cancelled", "preempted") else "error"
-        self.bus.publish("operation." + op.state, op.to_dict(), sev)
+        self._emit("operation." + op.state, op.to_dict(), sev)
 
     def _check_cancel(self, op):
+        if op.deadline and time.time() > op.deadline and not op.cancel.is_set():
+            self.link.send("MODE:MANUAL")
+            raise _OpEnd("timed_out", "TIMEOUT", "deadline_s passed; stopped where it was")
         if op.cancel.is_set():
-            if op.cancel_reason != "preempted": self.link.send("MODE:MANUAL")   # freeze where it is now
-            raise _OpEnd("preempted" if op.cancel_reason == "preempted" else "cancelled", "CANCELLED" if op.cancel_reason != "preempted" else "PREEMPTED",
-                         op.cancel_reason or "cancelled")
+            if op.cancel_reason == "preempted": raise _OpEnd("preempted", "PREEMPTED", "preempted by a newer operation")
+            self.link.send("MODE:MANUAL")   # freeze where it is now
+            raise _OpEnd("cancelled", "CANCELLED", op.cancel_reason or "cancelled")
 
     def _sleep(self, op, s):
         end = time.time() + s
@@ -370,6 +484,7 @@ class Device:
         st0 = self._st()
         dist = max(abs(pan - st0.get("pan", pan)), abs(tilt - st0.get("tilt", tilt)))
         t_send = time.time()
+        op.commanded = True
         if not (self.link.send(f"SPD:{speed:.0f}") and self.link.send(f"PT:{pan:.2f},{tilt:.2f}")):
             raise _OpEnd("failed", "LINK_LOST", "could not send to firmware")
         hit = lambda st: abs(st.get("tp", 1e9) - pan) <= 0.15 and abs(st.get("tt", 1e9) - tilt) <= 0.15
@@ -378,13 +493,14 @@ class Device:
             if time.time() - t_send > self.cfg.ack_timeout_s:
                 raise _OpEnd("failed", "COMMAND_NOT_ACKNOWLEDGED", "firmware status never showed the new target")
             time.sleep(0.02)
-        op.device_ack_at = op.device_ack_at or time.time()
+        if not op.device_ack_at: op.set(device_ack_at=time.time())
         deadline = t_send + dist / speed * 1.5 + 2.0
         while True:
             self._check_cancel(op)
             st = self._st()
             if not self.status_fresh(): raise _OpEnd("failed", "LINK_LOST", "firmware status lost during motion (firmware finishes the slew on its own)")
-            if not hit(st): raise _OpEnd("failed", "PREEMPTED_EXTERNALLY", f"firmware target changed by another client to {st.get('tp')},{st.get('tt')}")
+            if not hit(st): raise _OpEnd("failed", "PREEMPTED", f"firmware target changed by another client to {st.get('tp')},{st.get('tt')}",
+                                         reason="external_client")
             if abs(st["pan"] - pan) <= 0.15 and abs(st["tilt"] - tilt) <= 0.15: break
             if time.time() > deadline:
                 self.link.send("MODE:MANUAL")
@@ -407,43 +523,54 @@ class Device:
         start = (st0["pan"], st0["tilt"])
         steps = [{"index": i, "target_pan_deg": p, "target_tilt_deg": t, "status": "pending", "observation_id": None, "error": None}
                  for i, (p, t) in enumerate(pts)]
-        op.progress = {"completed_steps": 0, "total_steps": len(pts)}
-        op.result = {"survey_id": op.operation_id, "steps": steps, "observation_ids": [], "complete": False,
-                     "note": "observations from several directions; NOT a map (no depth, no localisation)"}
-        self.bus.publish("survey.started", {"survey_id": op.operation_id, "total_steps": len(pts)})
+        views = []
+        op.result.update(survey_id=op.operation_id, steps=steps, views=views, complete=False,
+                         note="views from several directions; NOT a map (no depth, no localisation)")
+        self._emit("survey.started", {"survey_id": op.operation_id, "total_steps": len(pts)})
+
+        def coverage():
+            got = [s for s in steps if s["status"] == "captured"]
+            if not got: return None
+            p = [s["target_pan_deg"] for s in got]; t = [s["target_tilt_deg"] for s in got]
+            return {"frame_id": self.frame_id, "pan_deg": [min(p), max(p)], "tilt_deg": [min(t), max(t)], "hfov_deg": self.cfg.hfov_deg or None}
         try:
             for s in steps:
                 self._goto(op, s["target_pan_deg"], s["target_tilt_deg"], speed)
                 t_rest = time.time()
                 self._sleep(op, max(0.0, settle - self.cfg.settle_s))
                 try:   # the frame must have been EXPOSED after the head came to rest
-                    o = self.observe(after_t=t_rest + self.cfg.camera_latency_s + EXPOSURE_MARGIN_S, timeout=3.0,
+                    o = self.observe(after_t=t_rest + self.cfg.camera_latency_s + EXPOSURE_MARGIN_S, timeout=3.0, kind="survey_view",
                                      source={"survey_id": op.operation_id, "operation_id": op.operation_id, "step_index": s["index"]})
                     s["status"], s["observation_id"] = "captured", o["observation_id"]
-                    op.result["observation_ids"].append(o["observation_id"])
+                    views.append(o); op.observation_ids.append(o["observation_id"])
                 except ApiError as e:
-                    s["status"], s["error"] = "capture_failed", {"code": e.code, "message": e.message}
-                op.progress = {"completed_steps": s["index"] + 1, "total_steps": len(pts)}
-                self.bus.publish("operation.progress", {"operation_id": op.operation_id, **op.progress, "step": s})
+                    s["status"], s["error"] = "capture_failed", e.err()
+                op.set(progress=(s["index"] + 1) / len(pts), result={**op.result, "coverage": coverage()})
+                self._emit("operation.progress", {"operation_id": op.operation_id, "progress": op.progress, "step": s})
             failed = [s for s in steps if s["status"] != "captured"]
             if restore != "none":
                 self._goto(op, *(start if restore == "previous" else (0.0, 0.0)), speed)
             op.result["complete"] = not failed
-            self.bus.publish("survey.completed", {"survey_id": op.operation_id, "captured": len(op.result["observation_ids"]),
-                                                  "total_steps": len(pts), "complete": not failed})
-            if failed: raise _OpEnd("failed", "SURVEY_INCOMPLETE", f"{len(failed)} of {len(pts)} captures failed (partial result kept)")
-            return op.result
+            self._emit("survey.completed", {"survey_id": op.operation_id, "captured": len(views), "total_steps": len(pts),
+                                            "complete": not failed, "observation_ids": list(op.observation_ids)})
+            if failed:
+                raise _OpEnd("failed", failed[0]["error"]["code"], f"{len(failed)} of {len(pts)} captures failed (partial views kept)",
+                             reason="survey_incomplete")
+            return {"coverage": coverage()}
         except _OpEnd as e:
             for s in steps:
                 if s["status"] == "pending": s["status"] = "not_reached"
-            if e.code != "SURVEY_INCOMPLETE":
-                self.bus.publish("survey.completed", {"survey_id": op.operation_id, "captured": len(op.result["observation_ids"]),
-                                                      "total_steps": len(pts), "complete": False, "ended": e.state})
+            if e.details.get("reason") != "survey_incomplete":
+                self._emit("survey.completed", {"survey_id": op.operation_id, "captured": len(views), "total_steps": len(pts),
+                                                "complete": False, "ended": e.state, "observation_ids": list(op.observation_ids)})
             raise
         finally:
             if prev and self.link.connected: self.link.send(f"SPD:{prev:.0f}")
 
     def stop(self, request_id):
+        """Always accepted. -> a finished gimbal.stop Operation (operation_result shape)."""
+        prior = self.replay(request_id) if request_id else None
+        if prior: return prior
         op = self.active if self.active and self.active.active else None
         if op: op.cancel_reason = "stop requested"; op.cancel.set()
         t_send = time.time()
@@ -458,18 +585,20 @@ class Device:
             p = self.pose()
             if self.link.status_t > t_send + 0.05 and p and not p["moving"]: confirmed = True; break
             time.sleep(0.02)
-        self.bus.publish("motion.stopped", {"request_id": request_id, "cancelled_operation_id": op and op.operation_id, "sent": sent},
-                         "info" if sent else "error")
-        if not sent: raise ApiError(503, "DEVICE_UNAVAILABLE", "stop could not be sent: firmware not connected (it holds its last target)",
-                                    cancelled_operation_id=op and op.operation_id)
-        return {"stopped": True, "confirmed_by_device": confirmed, "cancelled_operation_id": op and op.operation_id, "pose": self.pose(),
-                "note": "firmware froze its target at the commanded position; confirmed_by_device = a later status showed it holding there"}
+        s = self._record(Operation("gimbal.stop", {}, request_id or new_id("req"), self.cfg.device_id))
+        s.set(progress=1.0, result={"cancelled_operation_id": op and op.operation_id, "pose": self.pose(), "confirmed_by_device": confirmed,
+                                    "note": "firmware froze its target at the commanded position; confirmed_by_device = a later status showed it holding"})
+        if sent: s.set(state="succeeded", device_ack_at=time.time() if confirmed else None)
+        else: s.set(state="failed", error=err("OFFLINE", "stop could not be sent: firmware not connected (it holds its last target)"))
+        self._emit("motion.stopped", {"request_id": s.request_id, "cancelled_operation_id": op and op.operation_id, "sent": sent},
+                   "info" if sent else "error")
+        return s
 
     def cancel(self, op_id, request_id):
         op = self.ops.get(op_id)
         if not op: raise ApiError(404, "NOT_FOUND", f"no operation {op_id}")
-        if not op.active: return op
-        return self.stop(request_id) and op
+        if op.active: self.stop(request_id)
+        return op
 
     # ------------------------------------------------------------------ observations
     def _pose_at(self, t):
@@ -486,11 +615,10 @@ class Device:
         _, p, ti, _, _ = expo[-1]
         still = all(abs(h[1] - win[0][1]) < 0.15 and abs(h[2] - win[0][2]) < 0.15 and abs(h[1] - h[3]) < 0.15 and abs(h[2] - h[4]) < 0.15 for h in win)
         return {"frame_id": self.frame_id, "representation": "pan_tilt_relative", "pan_deg": p, "tilt_deg": ti, "source": POSE_SOURCE,
-                "physically_verified": False, "at_rest": still, "global_pose": None,
-                "note": "angles relative to this gimbal's calibrated zero; no transform to base_link/map is known"}, still
+                "physically_verified": False, "at_rest": still}, still
 
-    def observe(self, after_t=None, max_age_s=None, source=None, timeout=3.0, store=True):
-        """A camera observation. after_t: the frame must have arrived after this host time (fresh capture)."""
+    def observe(self, after_t=None, max_age_s=None, source=None, timeout=3.0, store=True, kind="frame_ref"):
+        """observation.schema.json frame observation. after_t: the frame must have arrived after this host time (fresh)."""
         if not self.link.stream_ok: raise ApiError(503, "CAMERA_UNAVAILABLE", self.link.stream_err or "camera stream not connected")
         end = time.time() + timeout
         jpg, t, seq = self.link.frame()
@@ -499,24 +627,23 @@ class Device:
             jpg, t, seq = self.link.wait_frame(seq, max(0.01, end - time.time()))
         if jpg is None: raise ApiError(503, "CAMERA_UNAVAILABLE", "no frame received yet")
         now, max_age = time.time(), self.cfg.frame_stale_s if max_age_s is None else max_age_s
-        if now - t > max_age: raise ApiError(503, "FRAME_STALE", f"newest frame is {now - t:.2f} s old (> {max_age} s)", frame_age_ms=round((now - t) * 1000))
+        if now - t > max_age: raise ApiError(503, "FRAME_STALE", f"newest frame is {now - t:.2f} s old (> {max_age} s)", frame_age_s=round(now - t, 3))
         pose, still = self._pose_at(t)
         w, h = jpeg_size(jpg)
-        oid = new_id("obs")
-        cs = self.camera_status()
-        o = {"schema": "observation/v0", "observation_id": oid, "created_at": iso(now), "timestamp": iso(t - self.cfg.camera_latency_s),
-             "received_at": iso(t), "device_id": self.cfg.device_id, "sensor_id": self.sensor_id, "sensor_type": "camera.rgb",
-             "data": {"media_type": "image/jpeg", "ref": f"/v1/observations/{oid}/image", "width": w, "height": h, "bytes": len(jpg),
-                      "sha256": hashlib.sha256(jpg).hexdigest()},
-             "camera": {"model": cs["model"], "calibration_ref": None, "hfov_deg": cs["intrinsics"]["hfov_deg"], "config": cs["config"]},
-             "pose": pose,
-             "timing": {"timestamp_source": "host_receive_time minus estimated_capture_latency_s", "estimated_capture_latency_s": self.cfg.camera_latency_s,
-                        "frame_age_ms_at_creation": round((now - t) * 1000), "clock": "host UTC (not synchronised with firmware)"},
+        oid, cs = new_id("obs"), self.camera_status()
+        quality = {"width": w, "height": h, "bytes": len(jpg), "sha256": hashlib.sha256(jpg).hexdigest(), "camera_model": cs["model"],
+                   "resolution": cs["config"]["resolution"], "hfov_deg": self.cfg.hfov_deg or None, "vfov_deg": self.cfg.vfov_deg or None}
+        o = {"schema_version": SCHEMA_VERSION, "observation_id": oid, "device_id": self.cfg.device_id, "sensor_id": self.sensor_id,
+             "sensor_type": "camera", "kind": kind, "observed_at": t - self.cfg.camera_latency_s, "frame_id": self.cam_frame_id,
+             "sensor_pose": pose,
              "validity": {"valid": True, "stale": False, "pose_at_rest": still, "reasons": [] if still else ["gimbal moving during exposure window"]},
-             "confidence": None, "processing": {"status": "raw", "model": None, "model_version": None, "results": []},
+             "quality": {k: v for k, v in quality.items() if v is not None}, "inferred": False, "data_ref": f"/v1/observations/{oid}/image",
+             "timing": {"timestamp_source": "host_receive_minus_latency", "estimated": True, "latency_s": self.cfg.camera_latency_s,
+                        "received_at": t, "created_at": now, "clock": "host (not synchronised with firmware)"},
              "source": source or {}}
         if store: self._store(o, jpg)
-        self.bus.publish("observation.created", {k: o[k] for k in ("observation_id", "timestamp", "sensor_id", "source")} | {"ref": o["data"]["ref"]})
+        self._emit("observation.created", {"observation_id": oid, "kind": kind, "observed_at": o["observed_at"], "data_ref": o["data_ref"],
+                                           "source": o["source"]})
         return o
 
     def _store(self, o, jpg):
@@ -539,12 +666,63 @@ class Device:
                 return json.load(open(base + ".json")), open(base + ".jpg", "rb").read()
         raise ApiError(404, "NOT_FOUND", f"no observation {oid} (expired or never existed)")
 
+    def latest(self, kind=None, sensor_id=None):
+        if sensor_id not in (None, self.sensor_id): raise ApiError(404, "NOT_FOUND", f"no sensor {sensor_id}")
+        if kind == "detections":
+            if not self.detections: raise ApiError(404, "NOT_FOUND", "no detections yet (is the tracker pushing to /v1/perception/events?)")
+            d = dict(self.detections)
+            age = time.time() - self.detections_t
+            d["validity"] = {**d["validity"], "stale": age > 2.0, "reasons": d["validity"]["reasons"] + (["older than 2 s"] if age > 2.0 else [])}
+            return d
+        with self.obs_lock:
+            for o, _ in reversed(self.obs.values()):
+                if kind in (None, o["kind"]): return o
+        raise ApiError(404, "NOT_FOUND", f"no {kind or ''} observation yet".replace("  ", " "))
+
+    def detections_live(self): return self.detections is not None and time.time() - self.detections_t < DETECTIONS_FRESH_S
+
     def _prune(self):
         if not self.cfg.persist_dir: return
         cutoff = time.time() - self.cfg.retention_hours * 3600
         for n in os.listdir(self.cfg.persist_dir):
             p = os.path.join(self.cfg.persist_dir, n)
             if os.path.getmtime(p) < cutoff: os.remove(p)
+
+    # ------------------------------------------------------------------ events: internal bus + room_event log
+    def _emit(self, type_, data, severity="info"):
+        ev = self.bus.publish(type_, data, severity)
+        room = self._to_room(type_, data)
+        if room:
+            with self.room_lock: self.room.append(room)
+        return ev
+
+    def _to_room(self, type_, data):
+        """Internal event -> room_event.schema.json (or None). Only what real logic supports; never entry/exit."""
+        oids = [data["observation_id"]] if data.get("observation_id") else list(data.get("observation_ids") or [])
+        if type_ == "perception.person_visible": rt, method = "presence_started", "detector_presence"
+        elif type_ == "perception.person_not_visible": rt, method = "presence_ended", "detector_presence"
+        elif type_ == "perception.presence_unknown": rt, method = "observation_gap", "detector_presence"
+        elif type_ == "survey.started": rt, method = "survey_started", "operation_result"
+        elif type_ == "survey.completed": rt, method = ("survey_completed" if data.get("complete") else "survey_failed"), "operation_result"
+        elif type_ == "device.connected": rt, method = "device_online", "heartbeat"
+        elif type_ == "device.fault": rt, method = ("device_offline" if data.get("code") == "OFFLINE" else "device_fault"), "heartbeat"
+        elif type_ == "camera.unavailable": rt, method, data = "device_fault", "device_report", {**data, "code": "CAMERA_UNAVAILABLE"}
+        elif type_ == "operation.succeeded" and data.get("operation") in ("gimbal.move", "gimbal.home"):
+            rt, method, data = "gimbal_moved", "operation_result", {"operation_id": data["operation_id"], "pose": data["result"].get("pose"),
+                                                                     "outcome": data["outcome"]}
+        else: return None
+        ev = {"schema_version": SCHEMA_VERSION, "event_id": new_id("evt"), "type": rt, "t": time.time(), "device_id": self.cfg.device_id,
+              "confirmed": False, "inferred": False, "evidence": {"method": method, "observation_ids": oids}, "data": data}
+        if method == "detector_presence": ev["sensor_id"] = self.sensor_id
+        return ev
+
+    def room_events(self, since=0.0, until=None, types=None, limit=200):
+        cutoff = time.time() - EVENT_RETENTION_S
+        with self.room_lock:
+            while self.room and self.room[0]["t"] < cutoff: self.room.popleft()
+            # since is INCLUSIVE: clients round it (the orchestrator sends 3 decimals); dedupe by event_id
+            out = [e for e in self.room if e["t"] >= since and (until is None or e["t"] <= until) and (not types or e["type"] in types)]
+        return out[:limit]
 
     # ------------------------------------------------------------------ monitor: connection, camera, state events
     def _monitor(self):
@@ -557,56 +735,71 @@ class Device:
             link, cam = self.status_fresh(), self.camera_status()["ready"]
             if link != was["link"]:
                 if was["link"] is not None or not link:
-                    self.bus.publish("device.connected" if link else "device.fault", {"code": None if link else "DEVICE_DISCONNECTED", "host": self.link.host},
-                                     "info" if link else "error")
+                    self._emit("device.connected" if link else "device.fault", {"code": None if link else "OFFLINE", "host": self.link.host},
+                               "info" if link else "error")
                 was["link"] = link
             if cam != was["cam"]:
                 if was["cam"] is not None or not cam:
-                    self.bus.publish("camera.available" if cam else "camera.unavailable", {"sensor_id": self.sensor_id, "error": self.link.stream_err or None},
-                                     "info" if cam else "error")
+                    self._emit("camera.available" if cam else "camera.unavailable", {"sensor_id": self.sensor_id, "error": self.link.stream_err or None},
+                               "info" if cam else "error")
                 was["cam"] = cam
             for k in ("cal", "calOn"):
                 if st.get(k) != was[k] and k in st:
-                    if was[k] is not None: self.bus.publish("device.calibration_changed", {"calibrated": st.get("cal"), "in_progress": st.get("calOn")})
+                    if was[k] is not None: self._emit("device.calibration_changed", {"calibrated": st.get("cal"), "in_progress": st.get("calOn")})
                     was[k] = st.get(k)
             p = self.pose(st)
             if p:   # state: on change, at most 2 Hz (pose is the commanded open-loop value)
                 key = (round(p["pan_deg"]), round(p["tilt_deg"]), p["moving"], st.get("mode"))
                 if key != last_state[0] and now - last_state[1] >= 0.5:
-                    self.bus.publish("device.state", {"pose": p, "firmware_mode": st.get("mode")}); last_state = (key, now)
+                    self._emit("device.state", {"pose": p, "firmware_mode": st.get("mode")}); last_state = (key, now)
             if now - last_prune > 60: self._prune(); last_prune = now
 
     def close(self):
         """Shutdown: stop our own operation (freeze), leave everything else to the firmware."""
-        if self.active and self.active.active: self.stop("shutdown")
+        if self.active and self.active.active: self.stop("shutdown_" + new_id("req"))
         self._closing = True
         self.link.close()
 
     # ------------------------------------------------------------------ perception (external detectors feed in here)
     def ingest(self, d):
-        from .perception import normalise
+        from .perception import normalise, detections_observation
         ev_type, data = normalise(d)
         if ev_type in REJECTED_EVENT_TYPES:
             raise ApiError(422, "UNSUPPORTED_EVENT", f"{ev_type} needs a doorway entry/exit classifier, which this device does not have")
+        if ev_type == "perception.detections":
+            self.detections = detections_observation(self, data)
+            self.detections_t = time.time()
+            return self.detections
         if ev_type in ("perception.person_visible", "perception.person_not_visible"):
             self.presence = {"state": "visible" if ev_type == "perception.person_visible" else "not_visible",
-                             "since": iso(time.time()), "source": data.get("detector")}
+                             "since": time.time(), "source": data.get("detector")}
             if ev_type == "perception.person_visible":
                 try: data["observation_id"] = self.observe(source={"event": ev_type})["observation_id"]
                 except ApiError as e: data["observation_error"] = e.code
         elif ev_type == "perception.presence_unknown":
-            self.presence = {"state": "unknown", "since": iso(time.time()), "source": data.get("detector")}
-        return self.bus.publish(ev_type, data)
+            self.presence = {"state": "unknown", "since": time.time(), "source": data.get("detector")}
+        return self._emit(ev_type, data)
 
-    def descriptor(self):
-        return {"schema": "device_descriptor/v0", "contract": CONTRACT, "device_id": self.cfg.device_id, "device_type": "pan_tilt_camera",
-                "model": "ANVYXO ESP32-S3 pan/tilt gimbal", "api_version": "v1",
+    def info(self):
+        """device_capabilities.schema.json. Advertises only what works right now."""
+        caps = ["gimbal.move", "gimbal.home", "gimbal.stop", "gimbal.motors", "camera.capture", "camera.frame", "survey.visual", "events.query"]
+        if self.detections_live(): caps.append("perception.detections")
+        dur = {"gimbal.move": 30, "gimbal.home": 30, "gimbal.stop": 3, "gimbal.motors": 3, "survey.visual": 600}
+        cap = {"gimbal.move": "gimbal.move", "gimbal.home": "gimbal.home", "gimbal.stop": "gimbal.stop", "gimbal.motors": "gimbal.motors",
+               "survey.visual": "survey.visual"}
+        fw = (getattr(self.link, "diag", None) or {}).get("fw")
+        fps = round(self.link.fps, 1)
+        return {"schema_version": SCHEMA_VERSION, "device_id": self.cfg.device_id, "device_type": "gimbal", "name": "ANVYXO ESP32-S3 pan/tilt gimbal",
+                "software_version": SOFTWARE_VERSION + (f"; firmware {fw}" if fw else ""), "capabilities": caps,
+                "operations": [{"name": n, "capability": cap[n], "args": OPERATION_ARGS[n], "long_running": n not in ("gimbal.stop", "gimbal.motors"),
+                                "max_duration_s": dur[n], "moves_hardware": n != "gimbal.stop"} for n in OPERATION_ARGS],
+                "sensors": [{"sensor_id": self.sensor_id, "sensor_type": "camera", "frame_id": self.cam_frame_id, **({"nominal_rate_hz": fps} if fps else {})}],
+                "event_types": ["presence_started", "presence_ended", "observation_gap", "survey_started", "survey_completed", "survey_failed",
+                                "gimbal_moved", "device_online", "device_offline", "device_fault"],
+                "event_retention_s": EVENT_RETENTION_S,
+                "unsupported": ["closed_loop_position_feedback", "acceleration_limiting", "automatic_motor_relax", "entry_exit_classification",
+                                "scene_interpretation", "mapping", "global_pose", "lens_intrinsics", "laser_control", "gimbal.tracking"],
                 "axes": [{"name": "pan", "unit": "deg", "positive": "right, seen from behind", "actuator": "MG996R hobby servo", "feedback": "none (open loop)"},
                          {"name": "tilt", "unit": "deg", "positive": "up", "actuator": "MG90S hobby servo", "feedback": "none (open loop)"}],
-                "sensors": [{"sensor_id": self.sensor_id, "sensor_type": "camera.rgb", "frame_id": f"{self.cfg.device_id}/camera_optical",
-                             "mounted_on": self.frame_id, "calibration_ref": None}],
-                "coordinate_frames": {self.frame_id: "origin at pan/tilt axes; zero = calibrated straight ahead + level; not linked to any map/base_link"},
-                "capabilities": ["health", "status", "move.absolute", "move.relative", "stop", "home", "camera.status", "camera.snapshot",
-                                 "camera.stream.mjpeg", "camera.config", "survey.bounded", "events.sse", "perception.ingest.person_visibility"],
-                "unsupported": ["closed_loop_position_feedback", "acceleration_limiting", "entry_exit_classification", "scene_interpretation",
-                                "mapping", "global_pose", "lens_intrinsics", "laser_control_via_api"]}
+                "coordinate_frames": {self.frame_id: "origin at pan/tilt axes; zero = calibrated straight ahead + level; not linked to any map/base_link",
+                                      self.cam_frame_id: "camera optical frame on the head (offset in gimbal.py CAM_Z/Y_FRONT, not yet published)"}}

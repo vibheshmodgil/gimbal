@@ -44,7 +44,7 @@ class FirmwareLink(_Frames):
     def __init__(self, host, ws_port=81, stream_port=82):
         super().__init__()
         self.host, self.ws_url, self.stream_url = host, f"ws://{host}:{ws_port}/", f"http://{host}:{stream_port}/stream"
-        self.connected, self.status, self.status_t, self.cam = False, {}, 0.0, {}
+        self.connected, self.status, self.status_t, self.cam, self.diag = False, {}, 0.0, {}, {}
         self.stream_ok, self.stream_err, self.viewers, self._ws, self._stop = False, "connecting", 0, None, False
         threading.Thread(target=self._ws_loop, daemon=True, name="gimbal-ws").start()
         threading.Thread(target=self._stream_loop, daemon=True, name="gimbal-stream").start()
@@ -60,6 +60,7 @@ class FirmwareLink(_Frames):
     def _open(self, _):
         self.connected = True
         self.send("CAMGET")
+        self.send("DIAG")   # firmware version etc.
 
     def _msg(self, _, m):
         if not m.startswith("{"): return
@@ -67,6 +68,7 @@ class FirmwareLink(_Frames):
         except ValueError: return
         if j.get("t") == "s": self.status, self.status_t = j, time.time()
         elif j.get("t") == "c": self.cam = j
+        elif j.get("t") == "d": self.diag = j
 
     def send(self, cmd):
         try:
@@ -118,7 +120,7 @@ class MockLink(_Frames):
     def __init__(self, calibrated=True, fps=15.0, lp=(-90.0, 90.0), lt=(-45.0, 45.0), status_interval=0.15):
         super().__init__()
         self.host, self.online, self.camera, self.stall, self.deaf = "mock", True, True, False, False
-        self.cam = {"t": "c", "sensor": "MOCK", "ok": True, "res": 3, "fps": 25, "q": 12}
+        self.cam, self.diag = {"t": "c", "sensor": "MOCK", "ok": True, "res": 3, "fps": 25, "q": 12}, {"t": "d", "fw": "mock"}
         self._s = dict(t="s", cal=calibrated, calOn=False, invP=False, invT=False, lp=list(lp), lt=list(lt),
                        rp=[-90.0, 90.0], rt=[-90.0, 90.0], pan=0.0, tilt=0.0, tp=0.0, tt=0.0, laser=False, mode="MANUAL",
                        speed=120.0, trimPan=0, trimTilt=0, panEn=True, tiltEn=True, fps=fps)
@@ -151,6 +153,7 @@ class MockLink(_Frames):
         elif c == "C": s["tp"], s["tt"] = self._clamp(0, "p"), self._clamp(0, "t")
         elif c == "MODE:MANUAL": s["tp"], s["tt"], s["mode"] = s["pan"], s["tilt"], "MANUAL"
         elif c.startswith("SPD:"): s["speed"] = max(10.0, min(360.0, float(c[4:])))
+        elif c.startswith("SRV:") and len(c) >= 7: s["panEn" if c[4] == "P" else "tiltEn"] = c[6] == "1"
         elif c.startswith("CAM:"):
             k, v = cmd[4:].split(","); self.cam[k.lower()] = int(v)
         return True

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "spatial_observation.schema.json",
+  "title": "Observation plus explicit localization: what we know about WHERE it is",
+  "allOf": [{"$ref": "observation.schema.json"}],
+  "required": ["localization"],
+  "properties": {
+    "localization": {
+      "type": "object", "required": ["status"],
+      "properties": {
+        "status": {"enum": ["none", "bearing_only", "metric"],
+          "description": "none: no geometry. bearing_only: direction in frame_id, no range. metric: positions in metres."},
+        "map_frame_id": {"$ref": "common.schema.json#/$defs/frame_id",
+          "description": "Set only when a calibrated transform from frame_id to this map frame was applied."},
+        "transform_chain": {"type": "array", "items": {"type": "string"},
+          "description": "e.g. ['map->odom','odom->rc_car_1/base_link','rc_car_1/base_link->rc_car_1/laser']"},
+        "calibration_id": {"type": "string"},
+        "landmark_ref": {"type": "string"},
+        "uncertainty_m": {"type": "number", "minimum": 0}
+      }
+    }
+  }
+}

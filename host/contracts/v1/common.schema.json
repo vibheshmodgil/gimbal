@@ -1,0 +1,198 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "common.schema.json",
+  "title": "Shared definitions for Robotics Device API v1",
+  "$defs": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^1\\.[0-9]+$",
+      "description": "Major 1. Minor bumps only add optional fields; readers ignore unknown fields."
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_.:/-]+$"
+    },
+    "timestamp": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Unix epoch seconds (UTC), float. Producer's clock; readers correct with envelope.server_time."
+    },
+    "frame_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]+(/[a-z0-9_-]+)*$",
+      "description": "Coordinate frame, see shared/coordinate_frames.md, e.g. gimbal-01/pan_tilt_base, rc_car_1/laser, map."
+    },
+    "error": {
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "code": {
+          "enum": [
+            "INVALID_ARGUMENT",
+            "OUT_OF_RANGE",
+            "UNSUPPORTED",
+            "NOT_FOUND",
+            "OFFLINE",
+            "NOT_CALIBRATED",
+            "BUSY",
+            "ESTOPPED",
+            "UNAUTHORIZED",
+            "CONFLICT",
+            "TIMEOUT",
+            "CANCELLED",
+            "UNREACHABLE",
+            "VERSION_MISMATCH",
+            "MOTION_DISABLED",
+            "UNAVAILABLE",
+            "STALE",
+            "INTERNAL",
+            "MOTORS_DISABLED",
+            "CALIBRATION_IN_PROGRESS",
+            "CAMERA_UNAVAILABLE",
+            "FRAME_STALE",
+            "FRAME_TIMEOUT",
+            "PREEMPTED",
+            "LINK_LOST",
+            "MOTION_TIMEOUT",
+            "COMMAND_NOT_ACKNOWLEDGED",
+            "UNSUPPORTED_EVENT"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "details": {
+          "type": "object"
+        }
+      }
+    },
+    "envelope": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "ok",
+        "server_time"
+      ],
+      "properties": {
+        "schema_version": {
+          "$ref": "#/$defs/schema_version"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "server_time": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "data": {},
+        "error": {
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "$ref": "#/$defs/error"
+            }
+          ]
+        }
+      },
+      "if": {
+        "properties": {
+          "ok": {
+            "const": false
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/$defs/error"
+          }
+        }
+      }
+    },
+    "gimbal_pose": {
+      "type": "object",
+      "required": [
+        "frame_id",
+        "pan_deg",
+        "tilt_deg"
+      ],
+      "properties": {
+        "frame_id": {
+          "$ref": "#/$defs/frame_id"
+        },
+        "pan_deg": {
+          "type": "number",
+          "description": "+ = RIGHT seen from behind the gimbal (firmware convention)"
+        },
+        "tilt_deg": {
+          "type": "number",
+          "description": "+ = up"
+        },
+        "source": {
+          "enum": [
+            "firmware_commanded_open_loop",
+            "servo_feedback",
+            "encoder",
+            "imu",
+            "estimated"
+          ],
+          "description": "Where the angles come from. Only a measured source may make physically_verified true."
+        },
+        "physically_verified": {
+          "type": "boolean",
+          "description": "true only when a sensor measured this pose"
+        },
+        "representation": {
+          "const": "pan_tilt_relative"
+        }
+      }
+    },
+    "pose_3d": {
+      "type": "object",
+      "required": [
+        "frame_id",
+        "position_m"
+      ],
+      "properties": {
+        "frame_id": {
+          "$ref": "#/$defs/frame_id"
+        },
+        "position_m": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "orientation_xyzw": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          },
+          "minItems": 4,
+          "maxItems": 4
+        },
+        "covariance": {
+          "type": "array",
+          "items": {
+            "type": "number"
+          }
+        }
+      }
+    }
+  }
+}

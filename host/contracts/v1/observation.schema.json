@@ -1,0 +1,215 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "observation.schema.json",
+  "title": "One sensor observation from any device (camera, LiDAR, IMU, odometry, presence ...)",
+  "type": "object",
+  "required": [
+    "observation_id",
+    "device_id",
+    "sensor_id",
+    "sensor_type",
+    "kind",
+    "observed_at",
+    "frame_id",
+    "validity"
+  ],
+  "properties": {
+    "schema_version": {
+      "$ref": "common.schema.json#/$defs/schema_version"
+    },
+    "observation_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "device_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "sensor_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "sensor_type": {
+      "enum": [
+        "camera",
+        "lidar",
+        "imu",
+        "odometry",
+        "wheel_encoders",
+        "presence",
+        "microphone",
+        "tof",
+        "model"
+      ]
+    },
+    "kind": {
+      "enum": [
+        "detections",
+        "presence_count",
+        "scene_description",
+        "frame_ref",
+        "lidar_scan",
+        "imu",
+        "odometry",
+        "obstacles",
+        "survey_view"
+      ]
+    },
+    "observed_at": {
+      "$ref": "common.schema.json#/$defs/timestamp",
+      "description": "Capture time of the underlying data."
+    },
+    "frame_id": {
+      "$ref": "common.schema.json#/$defs/frame_id",
+      "description": "Frame the data is expressed in."
+    },
+    "sensor_pose": {
+      "oneOf": [
+        {
+          "$ref": "common.schema.json#/$defs/gimbal_pose"
+        },
+        {
+          "$ref": "common.schema.json#/$defs/pose_3d"
+        }
+      ],
+      "description": "Pose of the sensor at capture, if known."
+    },
+    "validity": {
+      "type": "object",
+      "required": [
+        "valid"
+      ],
+      "properties": {
+        "valid": {
+          "type": "boolean"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "pose_at_rest": {
+          "type": "boolean",
+          "description": "sensor was not moving during exposure"
+        }
+      }
+    },
+    "quality": {
+      "type": "object",
+      "description": "e.g. {blur:0.1, exposure:'ok', points:360}"
+    },
+    "inferred": {
+      "type": "boolean",
+      "default": false,
+      "description": "true when produced by a model's interpretation (VLM text). Never a metric source."
+    },
+    "model": {
+      "type": "string"
+    },
+    "detections": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "label",
+          "confidence"
+        ],
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "track_id": {
+            "type": [
+              "integer",
+              "string"
+            ]
+          },
+          "box_norm": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "minItems": 4,
+            "maxItems": 4
+          },
+          "bearing": {
+            "type": "object",
+            "required": [
+              "pan_deg",
+              "tilt_deg"
+            ],
+            "properties": {
+              "pan_deg": {
+                "type": "number"
+              },
+              "tilt_deg": {
+                "type": "number"
+              }
+            },
+            "description": "Direction of the detection in frame_id. Bearing only: no range."
+          },
+          "position_m": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "minItems": 3,
+            "maxItems": 3,
+            "description": "Metric position in frame_id ONLY if measured (LiDAR/depth/calibrated geometry)."
+          }
+        }
+      }
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "text": {
+      "type": "string",
+      "description": "scene_description text (inferred)."
+    },
+    "scan": {
+      "type": "object",
+      "description": "lidar_scan: {format:'polar_deg_mm', points:[[angle_deg, dist_mm],...]} or {uri}"
+    },
+    "values": {
+      "type": "object",
+      "description": "imu/odometry readings with units in key names, e.g. heading_deg"
+    },
+    "data_ref": {
+      "type": "string",
+      "description": "URI of bulk data (frame, scan). Raw frames are not retained by default."
+    },
+    "timing": {
+      "type": "object",
+      "required": [
+        "timestamp_source"
+      ],
+      "properties": {
+        "timestamp_source": {
+          "enum": [
+            "sensor_clock",
+            "device_clock",
+            "host_receive_minus_latency",
+            "host_receive"
+          ]
+        },
+        "estimated": {
+          "type": "boolean"
+        },
+        "latency_s": {
+          "type": "number"
+        }
+      },
+      "description": "How observed_at was obtained. The gimbal has no capture clock: host receive time minus measured latency."
+    }
+  }
+}

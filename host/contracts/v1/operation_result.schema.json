@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "operation_result.schema.json",
+  "title": "Result/progress of a command (POST /v1/commands, GET /v1/operations/{id}, POST /v1/stop)",
+  "type": "object",
+  "required": [
+    "operation_id",
+    "request_id",
+    "device_id",
+    "operation",
+    "state",
+    "outcome",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "operation_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "request_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "device_id": {
+      "$ref": "common.schema.json#/$defs/id"
+    },
+    "operation": {
+      "type": "string"
+    },
+    "state": {
+      "enum": [
+        "accepted",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "rejected",
+        "timed_out",
+        "preempted"
+      ]
+    },
+    "outcome": {
+      "enum": [
+        "confirmed",
+        "commanded_reached",
+        "unconfirmed",
+        "none"
+      ],
+      "description": "confirmed = a SENSOR measured the goal reached. commanded_reached = the device finished the commanded motion open-loop (no position sensor). unconfirmed = commanded, completion not known. none = nothing happened."
+    },
+    "progress": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "result": {
+      "type": "object"
+    },
+    "error": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "common.schema.json#/$defs/error"
+        }
+      ]
+    },
+    "observation_ids": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "created_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "updated_at": {
+      "$ref": "common.schema.json#/$defs/timestamp"
+    },
+    "device_ack_at": {
+      "$ref": "common.schema.json#/$defs/timestamp",
+      "description": "firmware echoed/accepted the command"
+    }
+  }
+}
