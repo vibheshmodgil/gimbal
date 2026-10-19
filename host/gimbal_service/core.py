@@ -60,6 +60,7 @@ class Config:
     persist_dir: str = ""                     # empty = memory only (privacy default); else JPEG + JSON per observation
     retention_hours: float = 24.0
     lopsided_deg: float = 30.0                # servo reach asymmetry that means the horn is mounted off-centre
+    event_webhook: str = ""                   # optional: POST every room_event JSON here (e.g. the assistant's /gimbal/event)
 
     @classmethod
     def from_env(cls):
@@ -694,6 +695,8 @@ class Device:
         room = self._to_room(type_, data)
         if room:
             with self.room_lock: self.room.append(room)
+            if self.cfg.event_webhook:   # fire-and-forget: a slow receiver never blocks the device
+                threading.Thread(target=self._post_event, args=(room,), daemon=True).start()
         return ev
 
     def _to_room(self, type_, data):
@@ -715,6 +718,14 @@ class Device:
               "confirmed": False, "inferred": False, "evidence": {"method": method, "observation_ids": oids}, "data": data}
         if method == "detector_presence": ev["sensor_id"] = self.sensor_id
         return ev
+
+    def _post_event(self, ev):
+        import json, urllib.request
+        try:
+            urllib.request.urlopen(urllib.request.Request(self.cfg.event_webhook, json.dumps(ev).encode(),
+                                                          {"Content-Type": "application/json"}), timeout=2)
+        except Exception:
+            pass   # receiver down: the event is still in GET /v1/events (24 h)
 
     def room_events(self, since=0.0, until=None, types=None, limit=200):
         cutoff = time.time() - EVENT_RETENTION_S

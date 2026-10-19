@@ -373,7 +373,20 @@ def _try(fn):
     except Exception: pass   # webhook receiver down: drop the event, never stall the tracker
 
 
-def main(gimbal_ip, port, webhook=None, stream_url=None):
+def detections_payload(tracks, tf, ref, latency, detector):
+    """perception.detections for the device service: every track detected in the frame that arrived at tf.
+    Bearing = the track's latency-compensated gimbal angles (pan + right, tilt + up). Direction only, no range."""
+    dets = [dict(label="person" if detector == "person" else "face", confidence=round(float(t.score), 3), track_id=t.id,
+                 box_norm=[round(min(1.0, max(0.0, float(v))), 4) for v in t.box],
+                 bearing=dict(pan_deg=round(float(t.w[0]), 2), tilt_deg=round(float(t.w[1]), 2)))
+            for t in tracks if t.last == tf]
+    return dict(type="perception.detections", data=dict(
+        observed_at=tf - latency, latency_s=latency, detections=dets,
+        model="yolo11n-pose" if detector == "person" else "mediapipe-blazeface-full-range",
+        sensor_pose=dict(pan_deg=round(float(ref[0]), 2), tilt_deg=round(float(ref[1]), 2))))
+
+
+def main(gimbal_ip, port, webhook=None, stream_url=None, device_url=None):
     from flask import Flask, Response, jsonify, request, send_file
     import logging; logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
@@ -381,6 +394,16 @@ def main(gimbal_ip, port, webhook=None, stream_url=None):
     P["tracking"], P["laser_mode"], P["laser_feet"] = False, "off", False   # never start moving or lasing by itself
     stream, gimbal, hist, tracker = Stream(gimbal_ip, stream_url), Gimbal(gimbal_ip), CmdHistory(), Tracker()
     S = dict(go_home=True, mode="OFF", det_hz=0.0, det_ms=0.0, det_err="", shape=(240, 320), e=[0, 0], out=[0, 0], terms=[[0] * 3, [0] * 3], cmd=[0, 0])
+
+    # newest detections -> device service (its /v1/perception/events). One slot, one sender thread: a slow or dead
+    # service never stalls detection, and stale results are dropped, not queued.
+    push = dict(t=0.0, body=None, ev=threading.Event())
+
+    def push_loop():
+        while True:
+            push["ev"].wait(); push["ev"].clear()
+            body = json.dumps(push["body"]).encode()
+            _try(lambda: urllib.request.urlopen(urllib.request.Request(device_url, body, {"Content-Type": "application/json"}), timeout=1))
 
     def detect_loop():
         dets_cache, seq, times = {}, 0, deque(maxlen=10)
@@ -402,7 +425,12 @@ def main(gimbal_ip, port, webhook=None, stream_url=None):
                 ti = time.time()
                 boxes = dets_cache[name](img, P["conf"])
                 S["det_ms"], S["shape"], S["det_err"] = (time.time() - ti) * 1000, img.shape[:2], ""
-                tracker.update(make_dets(boxes, hist.at(tf - P["latency"]), img.shape), tf)
+                ref = hist.at(tf - P["latency"])
+                tracker.update(make_dets(boxes, ref, img.shape), tf)
+                if device_url and tf - push["t"] >= 0.25:     # <= 4/s, empty lists too ("nobody in view" is news)
+                    with tracker.lock:
+                        push["body"] = detections_payload(list(tracker.tracks.values()), tf, ref, P["latency"], name)
+                    push["t"] = tf; push["ev"].set()
             except Exception as e:
                 S["det_err"] = f"{name}: {e}"[:120]; time.sleep(1)
             times.append(time.time())
@@ -720,7 +748,8 @@ def main(gimbal_ip, port, webhook=None, stream_url=None):
         return jsonify(ok=True, webhook=S["webhook"])
 
     for th in (stream, gimbal, threading.Thread(target=detect_loop, daemon=True), threading.Thread(target=control_loop, daemon=True),
-               threading.Thread(target=laser_loop, daemon=True), threading.Thread(target=presence_loop, daemon=True)):
+               threading.Thread(target=laser_loop, daemon=True), threading.Thread(target=presence_loop, daemon=True),
+               threading.Thread(target=push_loop, daemon=True)):
         th.start()
     print(f"ANVYXO tracker: http://localhost:{port}  (gimbal {gimbal_ip})")
     app.run(host="127.0.0.1", port=port, threaded=True)   # localhost only: it can move the gimbal
@@ -791,6 +820,12 @@ def selftest():
     assert feet_block((0.4, -0.1, 0.6, 0.6), (0.5, 0.66)) == ""           # tracked: aim 1.1 puts the feet just above centre
     assert feet_block((0.4, 0.0, 0.6, 0.99), (0.5, 0.99)).startswith("feet not visible")
     assert beam_hits((0.4, 0.2, 0.6, 0.8), (0.5, 0.5)) and not beam_hits((0.0, 0.0, 0.2, 0.3), (0.5, 0.5))
+    # detections push: only tracks seen in THIS frame, boxes clipped to 0..1, bearing = track angles
+    t1 = Track(1, dict(w=np.array([12.5, -3.0]), size=10.0, box=(-0.01, 0.2, 0.5, 1.02), score=0.81), 5.0)
+    t2 = Track(2, dict(w=np.array([0.0, 0.0]), size=10.0, box=(0, 0, 1, 1), score=0.9), 4.0)
+    d = detections_payload([t1, t2], 5.0, np.array([10.0, 0.0]), 0.31, "person")["data"]
+    assert [x["track_id"] for x in d["detections"]] == [1] and d["detections"][0]["box_norm"] == [0.0, 0.2, 0.5, 1.0]
+    assert d["detections"][0]["bearing"] == {"pan_deg": 12.5, "tilt_deg": -3.0} and abs(d["observed_at"] - 4.69) < 1e-9
     print("selftest ok")
 
 
@@ -799,8 +834,10 @@ if __name__ == "__main__":
     ap.add_argument("--gimbal", default="192.168.1.8")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--webhook", help="POST person_entered / person_left JSON here, e.g. http://localhost:8090/gimbal/event")
+    ap.add_argument("--device-url", help="push detections to the device service, e.g. "
+                    "http://127.0.0.1:8100/v1/perception/events?token=...  (enables its perception.detections)")
     ap.add_argument("--stream-url", help="read video here instead of the gimbal's :82 (e.g. the device service: "
                     "http://127.0.0.1:8100/v1/camera/stream?token=...), so both don't use up the gimbal's 2 stream slots")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
-    selftest() if a.selftest else main(a.gimbal, a.port, a.webhook, a.stream_url)
+    selftest() if a.selftest else main(a.gimbal, a.port, a.webhook, a.stream_url, a.device_url)

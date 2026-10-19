@@ -435,6 +435,24 @@ def test_presence_ingest_maps_to_room_events(env):
         assert code == 422 and e["error"]["code"] == "UNSUPPORTED_EVENT"
 
 
+def test_room_event_webhook(env):
+    import http.server, threading as th
+    got = []
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            got.append(json.loads(self.rfile.read(int(self.headers["Content-Length"])))); self.send_response(200); self.end_headers()
+        def log_message(self, *a): pass
+    srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+    th.Thread(target=srv.serve_forever, daemon=True).start()
+    dev, link, c = env
+    dev.cfg.event_webhook = f"http://127.0.0.1:{srv.server_port}/gimbal/event"
+    c("POST", "/v1/perception/events", {"event": "person_entered", "count": 1, "detector": "person"})
+    end = time.time() + 3
+    while not got and time.time() < end: time.sleep(0.02)
+    srv.shutdown()
+    assert got and got[0]["type"] == "presence_started"; valid(got[0], "room_event")
+
+
 def test_detections_ingest_and_latest(env):
     dev, link, c = env
     assert c("GET", "/v1/observations/latest?kind=detections")[1]["error"]["code"] == "NOT_FOUND"
