@@ -1,0 +1,173 @@
+{
+ "health": [
+  200,
+  {
+   "alive": true,
+   "device_id": "gimbal-01",
+   "not_ready_reasons": [],
+   "ready": true,
+   "schema": "health/v0",
+   "time": "2026-10-19T14:25:24.286Z"
+  }
+ ],
+ "status_before": {
+  "code": 200,
+  "ready": true,
+  "pose": {
+   "frame_id": "gimbal-01/pan_tilt_base",
+   "moving": false,
+   "pan_deg": 0.0,
+   "physically_verified": false,
+   "representation": "pan_tilt_relative",
+   "source": "firmware_commanded_open_loop",
+   "target_pan_deg": 0.0,
+   "target_tilt_deg": 0.0,
+   "tilt_deg": 0.0
+  },
+  "limits": {
+   "acceleration_limited": false,
+   "max_speed_dps": 120.0,
+   "pan_deg": [
+    -17.0,
+    90.0
+   ],
+   "servo_reach_pan_deg": [
+    -17.0,
+    163.0
+   ],
+   "servo_reach_tilt_deg": [
+    -72.0,
+    108.0
+   ],
+   "soft_pan_deg": [
+    -17.0,
+    163.0
+   ],
+   "soft_tilt_deg": [
+    -27.0,
+    63.0
+   ],
+   "tilt_deg": [
+    -27.0,
+    45.0
+   ]
+  },
+  "faults": [
+   {
+    "code": "NOT_CALIBRATED",
+    "message": "zero/limits not confirmed (UI Setup tab)",
+    "severity": "warning"
+   },
+   {
+    "code": "LOPSIDED_MOUNT",
+    "message": "pan servo reach -17..163 deg: horn mounted off-centre",
+    "severity": "warning"
+   },
+   {
+    "code": "LOPSIDED_MOUNT",
+    "message": "tilt servo reach -72..108 deg: horn mounted off-centre",
+    "severity": "warning"
+   }
+  ]
+ },
+ "move": {
+  "code": 202,
+  "state": "succeeded",
+  "error": null,
+  "device_ack_at": "2026-10-19T14:25:24.451Z",
+  "pose": {
+   "frame_id": "gimbal-01/pan_tilt_base",
+   "moving": false,
+   "pan_deg": 5.0,
+   "physically_verified": false,
+   "representation": "pan_tilt_relative",
+   "source": "firmware_commanded_open_loop",
+   "target_pan_deg": 5.0,
+   "target_tilt_deg": 0.0,
+   "tilt_deg": 0.0
+  }
+ },
+ "observation": {
+  "code": 201,
+  "observation_id": "obs_925a197c17d9490c",
+  "timestamp": "2026-10-19T14:25:25.079Z",
+  "received_at": "2026-10-19T14:25:25.389Z",
+  "pose": {
+   "at_rest": true,
+   "frame_id": "gimbal-01/pan_tilt_base",
+   "global_pose": null,
+   "note": "angles relative to this gimbal's calibrated zero; no transform to base_link/map is known",
+   "pan_deg": 5.0,
+   "physically_verified": false,
+   "representation": "pan_tilt_relative",
+   "source": "firmware_commanded_open_loop",
+   "tilt_deg": 0.0
+  },
+  "validity": {
+   "pose_at_rest": true,
+   "reasons": [],
+   "stale": false,
+   "valid": true
+  },
+  "data": {
+   "bytes": 4545,
+   "height": 240,
+   "media_type": "image/jpeg",
+   "ref": "/v1/observations/obs_925a197c17d9490c/image",
+   "sha256": "9d7ecb77ca27245cd5ccd18b1c9fbe1259bc295bb0b8fa1d58332910f06b64e0",
+   "width": 320
+  }
+ },
+ "image": {
+  "code": 200,
+  "bytes": 4545,
+  "jpeg": true
+ },
+ "move_back": "succeeded",
+ "passed": true,
+ "stop": {
+  "op_state": "cancelled",
+  "stopped_at_pan": 5.0,
+  "pan_after_0_6s": 5.0,
+  "target": 15.0
+ },
+ "limit_rejection": {
+  "code": 422,
+  "error": "OUT_OF_LIMITS"
+ },
+ "survey": {
+  "code": 202,
+  "state": "succeeded",
+  "error": null,
+  "steps": [
+   [
+    "captured",
+    "obs_dbaffaa0cd204829"
+   ],
+   [
+    "captured",
+    "obs_90f72ce68ad94536"
+   ],
+   [
+    "captured",
+    "obs_de28851fa3f0406a"
+   ]
+  ]
+ },
+ "event_types_seen": [
+  "camera.available",
+  "camera.unavailable",
+  "device.connected",
+  "device.fault",
+  "device.state",
+  "motion.stopped",
+  "observation.created",
+  "operation.accepted",
+  "operation.cancelled",
+  "operation.progress",
+  "operation.started",
+  "operation.succeeded",
+  "survey.completed",
+  "survey.started"
+ ]
+}

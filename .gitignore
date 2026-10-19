@@ -4,3 +4,5 @@ __pycache__/
 Firmware/**/build/
 Tracker/*.pt
 host/data/
+host/test_results/*.jpg
+host_hw.log

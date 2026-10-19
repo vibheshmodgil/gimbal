@@ -88,9 +88,9 @@ def home(st):
 # ------------------------------------------------------------------ gimbal I/O
 class Stream(threading.Thread):
     """Keeps only the newest JPEG; old frames are lag."""
-    def __init__(self, ip):
+    def __init__(self, ip, url=None):
         super().__init__(daemon=True)
-        self.url, self.jpg, self.t, self.seq, self.fps, self.err = f"http://{ip}:82/stream", None, 0.0, 0, 0.0, "connecting"
+        self.url, self.jpg, self.t, self.seq, self.fps, self.err = url or f"http://{ip}:82/stream", None, 0.0, 0, 0.0, "connecting"
         self.cond = threading.Condition()
 
     def run(self):
@@ -317,13 +317,13 @@ def _try(fn):
     except Exception: pass   # webhook receiver down: drop the event, never stall the tracker
 
 
-def main(gimbal_ip, port, webhook=None):
+def main(gimbal_ip, port, webhook=None, stream_url=None):
     from flask import Flask, Response, jsonify, request, send_file
     import logging; logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
     if os.path.exists(PARAMS_FILE): P.update({k: v for k, v in json.load(open(PARAMS_FILE)).items() if k in DEFAULTS})
     P["tracking"], P["laser_mode"], P["laser_feet"] = False, "off", False   # never start moving or lasing by itself
-    stream, gimbal, hist, tracker = Stream(gimbal_ip), Gimbal(gimbal_ip), CmdHistory(), Tracker()
+    stream, gimbal, hist, tracker = Stream(gimbal_ip, stream_url), Gimbal(gimbal_ip), CmdHistory(), Tracker()
     S = dict(go_home=True, mode="OFF", det_hz=0.0, det_ms=0.0, det_err="", shape=(240, 320), e=[0, 0], out=[0, 0], terms=[[0] * 3, [0] * 3], cmd=[0, 0])
 
     def detect_loop():
@@ -700,6 +700,8 @@ if __name__ == "__main__":
     ap.add_argument("--gimbal", default="192.168.1.8")
     ap.add_argument("--port", type=int, default=8000)
     ap.add_argument("--webhook", help="POST person_entered / person_left JSON here, e.g. http://localhost:8090/gimbal/event")
+    ap.add_argument("--stream-url", help="read video here instead of the gimbal's :82 (e.g. the device service: "
+                    "http://127.0.0.1:8100/v1/camera/stream?token=...), so both don't use up the gimbal's 2 stream slots")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
-    selftest() if a.selftest else main(a.gimbal, a.port, a.webhook)
+    selftest() if a.selftest else main(a.gimbal, a.port, a.webhook, a.stream_url)

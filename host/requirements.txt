@@ -1,0 +1,6 @@
+# device adapter only: no AI/model packages (those stay in Tracker/requirements.txt)
+flask>=3.0
+websocket-client>=1.7
+# tests
+pytest>=8
+jsonschema>=4.20

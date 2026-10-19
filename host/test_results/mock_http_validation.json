@@ -1,0 +1,153 @@
+{
+ "health": [
+  200,
+  {
+   "alive": true,
+   "device_id": "gimbal-01",
+   "not_ready_reasons": [],
+   "ready": true,
+   "schema": "health/v0",
+   "time": "2026-10-19T14:25:16.109Z"
+  }
+ ],
+ "status_before": {
+  "code": 200,
+  "ready": true,
+  "pose": {
+   "frame_id": "gimbal-01/pan_tilt_base",
+   "moving": false,
+   "pan_deg": 0.0,
+   "physically_verified": false,
+   "representation": "pan_tilt_relative",
+   "source": "firmware_commanded_open_loop",
+   "target_pan_deg": 0.0,
+   "target_tilt_deg": 0.0,
+   "tilt_deg": 0.0
+  },
+  "limits": {
+   "acceleration_limited": false,
+   "max_speed_dps": 120.0,
+   "pan_deg": [
+    -90.0,
+    90.0
+   ],
+   "servo_reach_pan_deg": [
+    -90.0,
+    90.0
+   ],
+   "servo_reach_tilt_deg": [
+    -90.0,
+    90.0
+   ],
+   "soft_pan_deg": [
+    -90.0,
+    90.0
+   ],
+   "soft_tilt_deg": [
+    -45.0,
+    45.0
+   ],
+   "tilt_deg": [
+    -45.0,
+    45.0
+   ]
+  },
+  "faults": []
+ },
+ "move": {
+  "code": 202,
+  "state": "succeeded",
+  "error": null,
+  "device_ack_at": "2026-10-19T14:25:16.167Z",
+  "pose": {
+   "frame_id": "gimbal-01/pan_tilt_base",
+   "moving": false,
+   "pan_deg": 10.0,
+   "physically_verified": false,
+   "representation": "pan_tilt_relative",
+   "source": "firmware_commanded_open_loop",
+   "target_pan_deg": 10.0,
+   "target_tilt_deg": 5.0,
+   "tilt_deg": 5.0
+  }
+ },
+ "observation": {
+  "code": 201,
+  "observation_id": "obs_9d0493330e1f4ccb",
+  "timestamp": "2026-10-19T14:25:16.915Z",
+  "received_at": "2026-10-19T14:25:17.225Z",
+  "pose": {
+   "at_rest": true,
+   "frame_id": "gimbal-01/pan_tilt_base",
+   "global_pose": null,
+   "note": "angles relative to this gimbal's calibrated zero; no transform to base_link/map is known",
+   "pan_deg": 10.0,
+   "physically_verified": false,
+   "representation": "pan_tilt_relative",
+   "source": "firmware_commanded_open_loop",
+   "tilt_deg": 5.0
+  },
+  "validity": {
+   "pose_at_rest": true,
+   "reasons": [],
+   "stale": false,
+   "valid": true
+  },
+  "data": {
+   "bytes": 676,
+   "height": 48,
+   "media_type": "image/jpeg",
+   "ref": "/v1/observations/obs_9d0493330e1f4ccb/image",
+   "sha256": "aa8f7c166486f338dcbafa486bfa4aa15b48268e30c7a90b9f984384a6f60a38",
+   "width": 64
+  }
+ },
+ "image": {
+  "code": 200,
+  "bytes": 676,
+  "jpeg": true
+ },
+ "move_back": "succeeded",
+ "passed": true,
+ "stop": {
+  "op_state": "cancelled",
+  "stopped_at_pan": 5.153303146362305,
+  "pan_after_0_6s": 5.153303146362305,
+  "target": 30.0
+ },
+ "limit_rejection": {
+  "code": 422,
+  "error": "OUT_OF_LIMITS"
+ },
+ "survey": {
+  "code": 202,
+  "state": "succeeded",
+  "error": null,
+  "steps": [
+   [
+    "captured",
+    "obs_115cccbb9edd40b6"
+   ],
+   [
+    "captured",
+    "obs_cfe7518389754b6c"
+   ],
+   [
+    "captured",
+    "obs_47830b56110c41ae"
+   ]
+  ]
+ },
+ "event_types_seen": [
+  "device.state",
+  "motion.stopped",
+  "observation.created",
+  "operation.accepted",
+  "operation.cancelled",
+  "operation.progress",
+  "operation.started",
+  "operation.succeeded",
+  "survey.completed",
+  "survey.started"
+ ]
+}
