@@ -24,7 +24,7 @@
 #define STREAM_PORT 82                   // MJPEG video: http://<ip>:82/stream (own task, never blocks control)
 #define STREAM_MAX_CLIENTS 2
 #define STATUS_INTERVAL_MS 150           // status JSON to the web page (drives the 3D twin)
-#define FW_VERSION "3.4"
+#define FW_VERSION "3.5"
 
 // -----------------------------
 // OLED screen in the base: 4 pins  GND->GND  VCC->3V3  SCL->GPIO47  SDA->GPIO21

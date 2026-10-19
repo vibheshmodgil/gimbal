@@ -145,6 +145,7 @@ String commandRun(const String &raw)
     if (up.startsWith("OLEDINV:")) { oledInvert(up[8] == '1'); return "OK invert"; }
     if (up.startsWith("OLEDPWR:")) { oledPower(up[8] == '1'); return "OK power"; }
     if (up.startsWith("OLEDTXT:")) { oledTest(0); oledSetText(cmd.substring(8)); return "OK text"; }
+    if (up.startsWith("MOOD:")) return oledMood(up.substring(5)) ? String("OK mood ") + oledMoodName() : "ERR MOOD:NEUTRAL|HAPPY|SEARCH|SAD|ANGRY|SLEEP|SURPRISED";
 
     // --- camera ---
     if (up == "CAMGET") return cameraJson();
@@ -163,7 +164,7 @@ String commandRun(const String &raw)
     if (up == "HELP" || up == "?")
         return "PT:p,t MV:dp,dt C L:1/0/T MODE:PATROL|SCAN|NOD|SHAKE|TESTPAN|TESTTILT|MANUAL SPD:x TRIM:p,t SAVE SAVEP:n GO:n "
                "| CAL:ON|OFF|ZP|ZT|IP|IT|MPdeg|MTdeg|LP-|LP+|LT-|LT+|DONE|RESET "
-               "| SRV:P|T,0|1 LED:r,g,b DIAG REBOOT | OLED:n OLEDINIT I2C OLEDTEST:0-3 OLEDC:0-255 OLEDINV:0|1 OLEDPWR:0|1 OLEDTXT:a|b "
+               "| SRV:P|T,0|1 LED:r,g,b DIAG REBOOT | OLED:n OLEDINIT I2C OLEDTEST:0-3 OLEDC:0-255 OLEDINV:0|1 OLEDPWR:0|1 OLEDTXT:a|b MOOD:name "
                "| CAMGET CAM:key,v CAMP:FAST|BAL|HQ|MAX CAMSAVE CAMRESET | PING";
     return "ERR unknown (send HELP)";
 }

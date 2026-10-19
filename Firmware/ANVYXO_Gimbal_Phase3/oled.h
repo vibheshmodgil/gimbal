@@ -39,6 +39,11 @@ void oledContrast(int v);                 // 0..255
 void oledInvert(bool on);
 void oledPower(bool on);
 void oledSetText(const String &t);        // shows on the TEXT page ('|' = new line)
+// Eyes page mood, set by the tracker ("MOOD:HAPPY" ...). Expires to NEUTRAL 6 s after the last set, so a stopped
+// tracker never leaves the eyes stuck. SURPRISED is a 1.2 s pulse on top of the current mood.
+enum OledMood { MOOD_NEUTRAL, MOOD_HAPPY, MOOD_SEARCH, MOOD_SAD, MOOD_ANGRY, MOOD_SLEEP, MOOD_SURPRISED, MOOD_COUNT };
+bool oledMood(const String &name);        // false = unknown name
+const char *oledMoodName();
 int oledContrastValue();
 bool oledInverted();
 bool oledPowered();

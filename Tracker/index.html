@@ -174,7 +174,7 @@ const SLIDERS = {
   pidt:[['kp_tilt','Kp',0,8,0.05],['ki_tilt','Ki',0,3,0.02],['kd_tilt','Kd',0,1,0.01]],
   mot: [['deadband','Deadband pan °',0,5,0.1],['deadband_tilt','Deadband tilt °',0,8,0.1],['max_speed','Max speed °/s',10,240,5],['ff','Feed-forward',0,1,0.05],['latency','Latency s',0,0.8,0.01],
         ['smooth','Smoothing',0,0.9,0.05],['hfov','Camera FOV °',30,120,0.5],['vfov','Tilt FOV ° (0=auto)',0,120,0.5],['lost_s','Hold if lost s',0.2,5,0.1],['release_s','Drop lock s',0.5,10,0.5],['reacquire_s','Re-acquire s',0,10,0.5],
-        ['search_after','Search after s',1,15,0.5],['search_speed','Search °/s',5,40,1]],
+        ['search_after','Search after s',0,10,0.1],['search_speed','Search jump °/s',20,180,5],['search_dwell','Search look s',0.3,3,0.1]],
 };
 let P = {}, S = null, editing = {}, pending = {}, timer;
 function setP(o){ Object.assign(P, o); Object.assign(pending, o); for (const k in o) editing[k] = Date.now();
@@ -277,7 +277,7 @@ function drawOverlay(){
     if (!t.fresh) continue;
     const [x1, y1, x2, y2] = t.box, c = t.locked ? '#3ccf6e' : '#aab3bd';
     g.strokeStyle = c; g.lineWidth = t.locked ? 3 : 1.5; g.strokeRect(x1*W, y1*H, (x2-x1)*W, (y2-y1)*H);
-    const label = `ID ${t.id}${t.locked ? ' · LOCKED' : ''} · ${Math.round(t.score*100)}%`;
+    const label = `ID ${t.id}${t.locked ? ' · LOCKED' : ''} · ${t.face ? 'FACE' : 'head'} · ${Math.round(t.score*100)}%`;
     g.fillStyle = c; g.fillRect(x1*W, y1*H - 17, g.measureText(label).width + 8, 17);
     g.fillStyle = '#111'; g.fillText(label, x1*W + 4, y1*H - 5);
   }

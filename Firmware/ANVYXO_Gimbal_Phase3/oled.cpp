@@ -209,28 +209,87 @@ static void drawGimbal(const OledInfo &s)
     if (s.laser) { display.setCursor(74, 56); display.printf("LASER%lus", (unsigned long)s.laserLeft); }
 }
 
+static const char *MOOD_NAMES[MOOD_COUNT] = {"NEUTRAL", "HAPPY", "SEARCH", "SAD", "ANGRY", "SLEEP", "SURPRISED"};
+static int mood = MOOD_NEUTRAL;
+static uint32_t moodUntil = 0, surprisedUntil = 0;
+static uint32_t nextGlance = 2000, glanceUntil = 0, lastMoveMs = 0;
+static int glanceX = 0, glanceY = 0;
+#define MOOD_HOLD_MS  6000      // tracker refreshes every 2 s; silence = it stopped -> back to neutral
+#define SLEEP_AFTER_MS 60000    // no motion, no viewers, no mood for this long -> asleep
+
+bool oledMood(const String &name)
+{
+    for (int i = 0; i < MOOD_COUNT; i++)
+        if (name.equalsIgnoreCase(MOOD_NAMES[i]))
+        {
+            if (i == MOOD_SURPRISED) surprisedUntil = millis() + 1200;
+            else { mood = i; moodUntil = millis() + MOOD_HOLD_MS; }
+            return true;
+        }
+    return false;
+}
+
+const char *oledMoodName() { return MOOD_NAMES[mood]; }
+
+// one eye: white rounded body, black pupil + glint, then black lid shapes cut the expression
+static void drawEye(int cx, int cy, int w, int h, int px, int py, int pr, int lid, bool leftEye)
+{
+    int x0 = cx - w / 2, y0 = cy - h / 2;
+    display.fillRoundRect(x0, y0, w, h, min(10, h / 2), SSD1306_WHITE);
+    if (h > 8)
+    {
+        display.fillCircle(cx + px, cy + py, pr, SSD1306_BLACK);
+        display.fillCircle(cx + px + pr / 3 + 1, cy + py - pr / 3 - 1, max(1, pr / 4), SSD1306_WHITE);
+    }
+    int inner = leftEye ? x0 + w : x0, outer = leftEye ? x0 : x0 + w;
+    if (lid == MOOD_HAPPY) display.fillCircle(cx, cy + h / 2 + 10, w / 2 + 6, SSD1306_BLACK);           // ^ ^
+    if (lid == MOOD_SAD) display.fillTriangle(outer, y0 - 1, inner, y0 - 1, outer, y0 + h / 2, SSD1306_BLACK);
+    if (lid == MOOD_ANGRY) display.fillTriangle(inner, y0 - 1, outer, y0 - 1, inner, y0 + h / 2, SSD1306_BLACK);
+}
+
 static void drawEyes(const OledInfo &s)
 {
     uint32_t now = millis();
-    if (now > nextBlink) { blinkUntil = now + 140; nextBlink = now + 2500 + random(3500); }
-    bool blink = now < blinkUntil;
+    static float lastPan = 0, lastTilt = 0;
+    if (fabsf(s.pan - lastPan) > 0.5f || fabsf(s.tilt - lastTilt) > 0.5f || s.clients) { lastMoveMs = now; lastPan = s.pan; lastTilt = s.tilt; }
+    if (mood != MOOD_NEUTRAL && now > moodUntil) mood = MOOD_NEUTRAL;
+    int m = s.laser ? MOOD_ANGRY : mood;
+    if (m == MOOD_NEUTRAL && now - lastMoveMs > SLEEP_AFTER_MS) m = MOOD_SLEEP;
+    bool surprised = now < surprisedUntil;
 
-    // pupils follow where the camera looks
-    int ox = (int)(s.pan / PAN_LIMIT_DEG * 9);
-    int oy = (int)(-s.tilt / TILT_LIMIT_DEG * 7);
-    const int eyeW = 40, eyeH = blink ? 4 : 36, cy = 30;
-    for (int side = -1; side <= 1; side += 2)
+    if (now > nextBlink)   // sometimes a double blink
     {
-        int ex = 64 + side * 26 - eyeW / 2;
-        display.fillRoundRect(ex, cy - eyeH / 2, eyeW, eyeH, blink ? 2 : 10, SSD1306_WHITE);
-        if (!blink)
-        {
-            display.fillCircle(ex + eyeW / 2 + ox, cy + oy, 8, SSD1306_BLACK);
-            display.fillCircle(ex + eyeW / 2 + ox + 3, cy + oy - 3, 2, SSD1306_WHITE);
-        }
+        blinkUntil = now + 140;
+        nextBlink = now + (random(5) == 0 ? 260 : 2500 + random(3500));
     }
-    centered(s.ip, 56, 1);                       // IP always visible under the eyes (eyes span y 12..48)
-    if (s.laser) centered("* LASER *", 2, 1);    // laser warning moves above the eyes
+    bool blink = now < blinkUntil && !surprised;
+
+    // pupils follow where the camera looks, plus idle glances when nothing else is going on
+    int ox = (int)(s.pan / PAN_LIMIT_DEG * 9), oy = (int)(-s.tilt / TILT_LIMIT_DEG * 7);
+    if (m == MOOD_NEUTRAL && !s.moving)
+    {
+        if (now > nextGlance) { glanceX = random(-8, 9); glanceY = random(-5, 6); glanceUntil = now + 500 + random(900); nextGlance = now + 1500 + random(3000); }
+        if (now < glanceUntil) { ox += glanceX; oy += glanceY; }
+    }
+    if (m == MOOD_SEARCH) ox = (int)(9 * sinf(now / 260.0f));          // scanning left-right
+
+    int w = 40, h = 36, pr = 8, cy = 30;
+    if (surprised) { w = 38; h = 42; pr = 5; }
+    else if (m == MOOD_SEARCH) h = 22;
+    else if (m == MOOD_SLEEP || blink) h = 4;
+    ox = constrain(ox, -(w / 2 - pr - 2), w / 2 - pr - 2);
+    oy = constrain(oy, -(h / 2 - pr - 1), max(0, h / 2 - pr - 1));
+    for (int side = -1; side <= 1; side += 2) drawEye(64 + side * 26, cy, w, h, ox, oy, pr, surprised ? MOOD_NEUTRAL : m, side < 0);
+
+    if (m == MOOD_SLEEP)   // floating z Z z
+    {
+        int k = (now / 400) % 3;
+        display.setTextSize(1); display.setCursor(100 + k * 4, 14 - k * 4); display.print("z");
+        if (k > 0) { display.setCursor(106, 6); display.print("Z"); }
+    }
+    if (m == MOOD_SEARCH && (now / 500) % 2) { display.setTextSize(1); display.setCursor(120, 4); display.print("?"); }
+    centered(s.ip, 56, 1);                       // IP always visible under the eyes (eyes span y 9..51)
+    if (s.laser) centered("* LASER *", 0, 1);
 }
 
 void oledUpdate(const OledInfo &info)

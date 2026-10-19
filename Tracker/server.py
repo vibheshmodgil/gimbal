@@ -12,7 +12,8 @@ to any number of browsers. Three threads keep the video from ever waiting on the
 Models (switch live in the UI):
   person  YOLO11n (ultralytics, COCO "person") at 320 px, ~25-40 ms on CPU. Sees people from the
           side, from behind and in dim light; aims at the head ("aim height" = fraction from box top).
-          yolo11n.pt (5 MB) downloads next to this file on first use.
+          yolo11n-pose.pt (6 MB, same boxes + nose/eye keypoints) downloads next to this file on first use.
+          Aims at the FACE (nose + eyes) when they're visible, else at "aim height" in the box (back turned).
   face    MediaPipe BlazeFace full-range, ~5 ms, but only faces turned to the camera in decent light.
 
 Everything is done in gimbal angles, not pixels: each detection becomes an absolute pan/tilt
@@ -31,9 +32,14 @@ cv2.setNumThreads(2)   # default = one per core; they spin and starve the stream
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PARAMS_FILE = os.path.join(HERE, "params.json")
-PAN_LIM, TILT_LIM = 90.0, 45.0     # firmware PAN_LIMIT_DEG / TILT_LIMIT_DEG, used until the status reports calibrated limits
-SEARCH_TILTS = (0.0, 12.0, -6.0)   # full sweep tilt rows, relative to home
-SEARCH_NEAR_DEG, SEARCH_MARGIN = 20.0, 5.0   # first look +-20 deg around where the person vanished; stay 5 deg inside limits
+PAN_LIM, TILT_LIM = 90.0, 45.0     # CAD collision-checked envelope (gimbal.py): never track past it, whatever the firmware says
+FACE_KP_CONF = 0.5                 # pose keypoint confidence for nose/eyes to count as "face visible"
+SEARCH_TILTS = (0.0, 12.0, -6.0)   # tilt rows of the repeat passes, relative to home
+SEARCH_STEP_FOV, SEARCH_MARGIN = 0.6, 5.0   # stop-and-look views 0.6 x HFOV apart (overlap); stay 5 deg inside limits
+# Search moves ramp up/down at this rate. An instant 90 deg/s start of the MG996R browned the ESP32 out (reset reason
+# BROWNOUT, 2026-10-19 test): the gimbal rebooted and was gone ~12 s per jump. Raise only with a stiffer 5 V supply.
+SEARCH_ACCEL = 150.0               # deg/s^2
+STATUS_STALE_S = 0.6               # firmware sends status every 150 ms; older = gimbal not answering (rebooting / Wi-Fi)
 LASER_MARGIN = 0.10   # a person's box within 10 % of the picture centre counts as "in the beam" (laser sits above the lens)
 # "Dot at feet": track the floor just below the locked person's feet so the laser can stay on while tracking.
 FEET_AIM = 1.10       # aim point, fraction of box height from its top: 10 % below the feet = floor in front of them
@@ -57,7 +63,9 @@ DEFAULTS = dict(
     deadband_tilt=1.0,             # tilt has ~4 deg backlash (motion test): smaller deadband makes it hunt
     hfov=61.0,                     # 60.9 measured on the old OV5640; module is now an OV3660 -> calibration.json overrides
     pan_sign=1, tilt_sign=1, lost_s=1.2, release_s=4.0, reacquire_s=4.0,   # walk test: people dropped out for 3-4 s at the frame edge
-    search=True, search_after=3.0, search_speed=15.0,   # look around when nobody is locked (slow = sharp frames)
+    # search = stop-and-look: jump between views at search_speed, hold each for search_dwell s (sharp frames for the
+    # detector), first toward where the person was heading. Was a slow continuous sweep: 6-17 s to find someone.
+    search=True, search_after=0.3, search_speed=60.0, search_dwell=0.7,
     home_pan=0.0, home_tilt=0.0,   # offset from the calibrated 0,0 ("Set home = current position")
     allow_uncalibrated=False,
     laser_mode="off", laser_period=5.0,   # laser: off|on|flash|blink|strobe|sos; never saved, always off at start
@@ -75,9 +83,13 @@ def clip(x, lo, hi): return max(lo, min(hi, x))
 
 
 def limits(st):
-    """Soft limits from the firmware calibration wizard (status "lp"/"lt"); CAD limits until status arrives."""
-    lp, lt = st.get("lp") or (-PAN_LIM, PAN_LIM), st.get("lt") or (-TILT_LIM, TILT_LIM)
-    return np.array([lp[0], lt[0]], float), np.array([lp[1], lt[1]], float)
+    """Firmware soft limits ("lp"/"lt") AND servo reach ("rp"/"rt", fw 3.4+) AND the CAD envelope.
+    The firmware's own limits alone are not enough: an off-centre horn left them at pan -17..163 (2026-10-19)."""
+    lo, hi = np.array([-PAN_LIM, -TILT_LIM]), np.array([PAN_LIM, TILT_LIM])
+    for k, (a, b) in enumerate((("lp", "rp"), ("lt", "rt"))):
+        for key in (a, b):
+            if st.get(key): lo[k], hi[k] = max(lo[k], st[key][0]), min(hi[k], st[key][1])
+    return lo, hi
 
 
 def home(st):
@@ -123,6 +135,7 @@ class Gimbal(threading.Thread):
     def __init__(self, ip):
         super().__init__(daemon=True)
         self.url, self.ws, self.status, self.cam, self.connected = f"ws://{ip}:81/", None, {}, {}, False
+        self.status_t = 0.0
 
     def run(self):
         import websocket
@@ -136,7 +149,7 @@ class Gimbal(threading.Thread):
 
     def _msg(self, _, m):
         try:
-            if m.startswith('{"t":"s"'): self.status = json.loads(m)
+            if m.startswith('{"t":"s"'): self.status, self.status_t = json.loads(m), time.time()
             elif m.startswith('{"t":"c"'): self.cam = json.loads(m)
         except ValueError:
             pass
@@ -166,7 +179,7 @@ class PersonDet:
         torch.set_num_threads(2)   # all 8 threads spin and starve the stream/control threads
         torch.set_num_interop_threads(1)
         from ultralytics import YOLO
-        self.m = YOLO(os.path.join(HERE, "yolo11n.pt"))
+        self.m = YOLO(os.path.join(HERE, "yolo11n-pose.pt"))
         # NVIDIA GPU (needs the CUDA build of torch): ~5 ms instead of 60-90 ms and frees the CPU
         self.gpu = torch.cuda.is_available()
         self.device = 0 if self.gpu else "cpu"
@@ -174,7 +187,9 @@ class PersonDet:
     def __call__(self, img, conf):
         r = self.m.predict(img, imgsz=320, conf=conf, classes=[0], verbose=False, device=self.device)[0]
         h, w = img.shape[:2]
-        return [(x1 / w, y1 / h, x2 / w, y2 / h, s) for (x1, y1, x2, y2), s in zip(r.boxes.xyxy.tolist(), r.boxes.conf.tolist())]
+        kps = r.keypoints.data.tolist() if r.keypoints is not None else [[]] * len(r.boxes)
+        return [(x1 / w, y1 / h, x2 / w, y2 / h, s, face_point(k, w, h))
+                for (x1, y1, x2, y2), s, k in zip(r.boxes.xyxy.tolist(), r.boxes.conf.tolist(), kps)]
 
 
 class FaceDet:
@@ -193,6 +208,8 @@ class FaceDet:
 class Track:
     def __init__(self, tid, d, t):
         self.id, self.w, self.v, self.size, self.last, self.hits, self.box, self.score = tid, d["w"].copy(), np.zeros(2), d["size"], t, 1, d["box"], d["score"]
+        self.face = d.get("face", False)   # aimed at the face (pose keypoints) on the last detection, else box aim height
+        self.born = t
 
 
 class Tracker:
@@ -222,6 +239,7 @@ class Tracker:
                 r = d["w"] - pred
                 tr.w, tr.v = pred + a * r, np.clip(tr.v + b * r / dt, -60, 60)
                 tr.size, tr.last, tr.hits, tr.box, tr.score = 0.7 * tr.size + 0.3 * d["size"], t, tr.hits + 1, d["box"], d["score"]
+                tr.face = d.get("face", False)
             # re-acquire: the locked person vanished briefly (blur, turned away, gimbal moving) and a detection shows
             # up near where they were -> it's them; keep their ID instead of handing the lock to someone else.
             lk, free = self.tracks.get(self.locked), [i for i in range(len(dets)) if i not in used_d]
@@ -230,15 +248,24 @@ class Tracker:
                 d = dets[i]
                 if np.hypot(*(d["w"] - lk.w - np.clip(lk.v * (t - lk.last), -15, 15))) < max(20.0, 2.0 * max(d["size"], lk.size)):   # where they were heading
                     lk.w, lk.v, lk.size, lk.last, lk.hits, lk.box, lk.score = d["w"].copy(), np.zeros(2), d["size"], t, lk.hits + 1, d["box"], d["score"]
+                    lk.face = d.get("face", False)
                     used_d.add(i)
             for i, d in enumerate(dets):
                 if i not in used_d:
                     self.tracks[self.next_id] = Track(self.next_id, d, t); self.next_id += 1
             for tid in [k for k, tr in self.tracks.items() if t - tr.last > P["release_s"]]:
                 del self.tracks[tid]
-            if self.locked not in self.tracks:               # auto-lock: biggest (closest) person seen twice in a row
-                cands = [tr for tr in self.tracks.values() if tr.last == t and tr.hits >= 2]
-                self.locked = max(cands, key=lambda tr: tr.size).id if cands else None
+            # auto-lock: nobody locked, or the locked track has been lost for lost_s (a fast mover often comes back as a
+            # NEW track outside the match gate; waiting release_s for the old one froze the camera with them in view).
+            # New lock = a track that APPEARED after the locked one vanished (not a bystander who was already there),
+            # nearest to where the lost one was; with nobody locked, the biggest (closest) person.
+            lk = self.tracks.get(self.locked)
+            if lk is None or t - lk.last > P["lost_s"]:
+                cands = [tr for tr in self.tracks.values() if tr.last == t and tr.hits >= 2 and tr is not lk and (lk is None or tr.born > lk.last)]
+                if cands:
+                    self.locked = (min(cands, key=lambda tr: np.hypot(*(tr.w - lk.w))) if lk else max(cands, key=lambda tr: tr.size)).id
+                elif lk is None:
+                    self.locked = None
 
     def set_lock(self, tid):
         with self.lock: self.locked = tid if tid in self.tracks else None
@@ -270,6 +297,28 @@ class PID:
         return kp * e, ki * self.i, kd * self.d
 
 
+def search_plan(start, heading, lo, hi, home_tilt, hfov):
+    """Stop-and-look views [(pan, tilt), ...]: first pass at the lost tilt, from where the person vanished out toward
+    `heading` (+1 right / -1 left) to that limit, then the other side; then full-width repeat passes at the tilt rows."""
+    a, b = lo[0] + SEARCH_MARGIN, hi[0] - SEARCH_MARGIN
+    step, d = max(5.0, SEARCH_STEP_FOV * hfov), 1 if heading >= 0 else -1
+    clip_t = lambda t: clip(t, lo[1] + SEARCH_MARGIN, hi[1] - SEARCH_MARGIN)
+
+    def run(p0, direction, limit):   # p0 + step, p0 + 2 step ... ending exactly at the limit
+        out, p = [], p0
+        while (limit - p) * direction > 1.0:
+            p = clip(p + direction * step, min(a, b), max(a, b))
+            out.append(p)
+        return out
+    p0 = clip(start[0], a, b)
+    first = run(p0, d, b if d > 0 else a) + run(p0, -d, a if d > 0 else b)
+    plan = [(p, clip_t(start[1])) for p in first]
+    full = [a] + run(a, 1, b)
+    for k, r in enumerate(SEARCH_TILTS):
+        plan += [(p, clip_t(home_tilt + r)) for p in (full if k % 2 else full[::-1])]
+    return plan
+
+
 def laser_pattern(mode, t):
     if mode == "on": return True
     if mode == "flash": return t % max(P["laser_period"], 0.5) < 0.25     # short flash every N s
@@ -299,15 +348,22 @@ def feet_block(box, beam):
     return ""
 
 
+def face_point(kp, w, h):
+    """Mean of the confident nose / left eye / right eye keypoints (COCO 0-2), as picture fractions; None if not visible."""
+    pts = [(x / w, y / h) for x, y, c in kp[:3] if c >= FACE_KP_CONF]
+    return (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)) if pts else None
+
+
 def make_dets(boxes, ref, shape):
     h, w = shape[:2]
     vfov = P["vfov"] or P["hfov"] * h / w
     aim = (FEET_AIM if P["laser_feet"] else P["aim"]) if P["detector"] == "person" else 0.5
     out = []
-    for x1, y1, x2, y2, s in boxes:
-        ax, ay = (x1 + x2) / 2, y1 + aim * (y2 - y1)
+    for x1, y1, x2, y2, s, *face in boxes:
+        face = face[0] if face else None
+        ax, ay = face if face and not P["laser_feet"] else ((x1 + x2) / 2, y1 + aim * (y2 - y1))
         off = np.array([(ax - 0.5) * P["hfov"] * P["pan_sign"], -(ay - 0.5) * vfov * P["tilt_sign"]])
-        out.append(dict(w=ref + off, size=(x2 - x1) * P["hfov"], box=(x1, y1, x2, y2), score=s))
+        out.append(dict(w=ref + off, size=(x2 - x1) * P["hfov"], box=(x1, y1, x2, y2), score=s, face=bool(face)))
     return out
 
 
@@ -356,7 +412,8 @@ def main(gimbal_ip, port, webhook=None, stream_url=None):
     def control_loop():
         # the only thread that sends PT, so "go home" requests come in through S["go_home"] (no races)
         pids, cmd, last, sent, was = (PID(), PID()), np.zeros(2), time.time(), None, False
-        last_seen, last_pos, search_dir, row, bounces = time.time(), np.zeros(2), 1, 0, 0
+        last_seen, last_pos, heading, search, was_alive = time.time(), np.zeros(2), 1, None, True
+        mood_sent, mood_t, was_seen = None, 0.0, False
         while True:
             time.sleep(1 / 30)
             now = time.time(); dt = clip(now - last, 1e-3, 0.1); last = now
@@ -392,26 +449,47 @@ def main(gimbal_ip, port, webhook=None, stream_url=None):
                         for p in pids: p.reset()
             else:
                 for p in pids: p.reset()                     # lost: hold still, forget the integral
-            if seen or not P["tracking"]: last_seen, last_pos, bounces = now, cmd.copy(), 0
+            if seen:   # which way to look first if they vanish: where they were walking, else the frame side they were on
+                v = tracker.velocity()[0]
+                heading = np.sign(v) if abs(v) > 3 else np.sign(e[0]) if abs(e[0]) > 3 else heading
+            if seen or not P["tracking"]: last_seen, last_pos, search = now, cmd.copy(), None
             mode = "OFF" if not P["tracking"] else f"TRACKING ID {tracker.locked}" if seen else "LOST - holding"
+            alive = now - gimbal.status_t < STATUS_STALE_S
+            if P["tracking"] and not alive:
+                # gimbal rebooting (brownout) or Wi-Fi gap: its status is frozen, so neither track nor search on it.
+                # Hold the plan where it is and re-send the target as soon as it answers again.
+                mode, sent, was_alive = "GIMBAL NOT RESPONDING", None, False
+                S.update(e=e.tolist(), out=out.tolist(), terms=terms, cmd=cmd.tolist(), mode=mode)
+                continue
+            if not was_alive and "pan" in st:
+                # back after a reboot: it woke up centred. Carry on from where it IS (no big jump = no new brownout)
+                cmd = last_pos = np.clip([st["pan"], st["tilt"]], lo, hi); search, was_alive = None, True
             if P["tracking"] and not seen and now - last_seen > P["search_after"]:
                 h, step = home(st), P["search_speed"] * dt
                 if P["search"]:
-                    # first sweep +-20 deg around where they vanished (2 passes), then the whole room in tilt rows
-                    near = bounces < 2
-                    c, hw = (last_pos[0], SEARCH_NEAR_DEG) if near else (h[0], 1e3)
-                    a, b = max(c - hw, lo[0] + SEARCH_MARGIN), min(c + hw, hi[0] - SEARCH_MARGIN)
-                    goal_t = last_pos[1] if near else h[1] + SEARCH_TILTS[row]
-                    mode = "SEARCHING near last seen" if near else "SEARCHING"
-                    cmd[0] += search_dir * step
-                    if (search_dir > 0 and cmd[0] >= b) or (search_dir < 0 and cmd[0] <= a):
-                        search_dir, bounces = -search_dir, bounces + 1
-                        if not near: row = (row + 1) % len(SEARCH_TILTS)
-                    cmd[1] += clip(clip(goal_t, lo[1] + SEARCH_MARGIN, hi[1] - SEARCH_MARGIN) - cmd[1], -step, step)
+                    if search is None:
+                        search = dict(plan=search_plan(last_pos, heading, lo, hi, h[1], P["hfov"]), i=0, until=None, v=0.0)
+                    plan = search["plan"]
+                    goal = np.array(plan[search["i"] % len(plan)])
+                    # move with a speed ramp (accel + brake), then stand still and look
+                    dist = float(np.abs(goal - cmd).max())
+                    search["v"] = min(search["v"] + SEARCH_ACCEL * dt, P["search_speed"], np.sqrt(2 * SEARCH_ACCEL * dist))
+                    cmd = cmd + np.clip(goal - cmd, -search["v"] * dt, search["v"] * dt)
+                    if dist < 0.5: search["v"] = 0.0
+                    if np.abs(goal - cmd).max() < 0.5:
+                        search["until"] = search["until"] or now + P["search_dwell"]
+                        if now >= search["until"]: search["i"], search["until"] = search["i"] + 1, None
+                    mode = f"SEARCHING view {search['i'] % len(plan) + 1}/{len(plan)}"
                 elif tracker.locked is None:                 # search off and the person is gone for good: drift home
                     cmd = cmd + np.clip(h - cmd, -step, step)
                     mode = "HOME - waiting" if np.abs(h - cmd).max() < 0.1 else "RETURNING HOME"
                 cmd = np.clip(cmd, lo, hi)
+            # the gimbal's OLED eyes show what we're doing (firmware 3.5+; expires to neutral if we stop sending)
+            mood = None if not P["tracking"] else "HAPPY" if seen else "SEARCH" if mode.startswith("SEARCH") else "SAD"
+            if seen and not was_seen: gimbal.send("MOOD:SURPRISED")      # just (re)found someone
+            was_seen = seen
+            if mood and (mood != mood_sent or now - mood_t > 2.0):
+                gimbal.send("MOOD:" + mood); mood_sent, mood_t = mood, now
             if P["tracking"] and (sent is None or np.abs(cmd - sent).max() > 0.05):
                 gimbal.send(f"PT:{cmd[0]:.2f},{cmd[1]:.2f}"); sent = cmd.copy()
             S.update(e=e.tolist(), out=out.tolist(), terms=terms, cmd=cmd.tolist(), mode=mode)
@@ -460,7 +538,7 @@ def main(gimbal_ip, port, webhook=None, stream_url=None):
         h, w = S["shape"]
         vfov = (P["vfov"] or P["hfov"] * h / w)
         with tracker.lock:
-            tracks = [dict(id=t.id, box=t.box, score=round(t.score, 2), locked=t.id == tracker.locked, fresh=now - t.last < 0.6)
+            tracks = [dict(id=t.id, box=t.box, score=round(t.score, 2), locked=t.id == tracker.locked, fresh=now - t.last < 0.6, face=t.face)
                       for t in tracker.tracks.values()]
         tgt, age = tracker.target(now, 0.0)
         aim = None
@@ -681,6 +759,27 @@ def selftest():
     st = dict(lp=[-30.0, 40.0], lt=[-10.0, 20.0])
     P.update(home_pan=100.0, home_tilt=-50.0)
     assert home(st).tolist() == [40.0, -10.0] and home({}).tolist() == [90.0, -45.0], home(st)
+    lo, hi = limits(dict(lp=[-17.0, 163.0], rp=[-17.0, 163.0], lt=[-27.0, 63.0], rt=[-72.0, 108.0]))   # the real lopsided gimbal
+    assert lo.tolist() == [-17.0, -27.0] and hi.tolist() == [90.0, 45.0], (lo, hi)
+    # search: lost at pan 40 heading right, limits +-90 (85 with margin), 52.8 deg FOV -> right first, then left, then rows
+    plan = search_plan(np.array([40.0, 5.0]), 1, np.array([-90.0, -45.0]), np.array([90.0, 45.0]), 0.0, 52.8)
+    pans = [p for p, _ in plan]
+    assert pans[0] > 40 and pans[1] == 85 and pans[2] < 40 and min(pans[:6]) == -85, pans[:8]
+    assert all(t == 5.0 for _, t in plan[:6]) and {t for _, t in plan[6:]} == {0.0, 12.0, -6.0}, plan
+    assert all(abs(q - p) <= 0.6 * 52.8 + 1e-9 for p, q in zip(pans[2:5], pans[3:6]))   # neighbouring views overlap
+    # lock handoff: locked person lost > lost_s, comes back as a NEW track far away -> lock moves to it, no 4 s freeze
+    P.update(DEFAULTS); tr, t = Tracker(), 0.0
+    for _ in range(3): tr.update([dict(w=np.array([0.0, 0.0]), size=10.0, box=(0, 0, 1, 1), score=0.9)], t); t += 0.1
+    old = tr.locked
+    t += P["lost_s"] + 0.1
+    for _ in range(2): tr.update([dict(w=np.array([45.0, 0.0]), size=10.0, box=(0, 0, 1, 1), score=0.9)], t); t += 0.1
+    assert tr.locked != old and tr.tracks[tr.locked].w[0] == 45.0, (old, tr.locked)
+    # face aim: confident nose/eyes win over the box's aim height; none visible -> box aim
+    assert face_point([[100, 50, 0.9], [110, 40, 0.8], [90, 40, 0.2]], 200, 100) == (0.525, 0.45)
+    assert face_point([[100, 50, 0.1]] * 3, 200, 100) is None
+    P.update(DEFAULTS)
+    d = make_dets([(0.2, 0.4, 0.6, 1.0, 0.9, (0.5, 0.6)), (0.2, 0.4, 0.6, 1.0, 0.9, None)], np.zeros(2), (240, 320))
+    assert d[0]["w"][1] != d[1]["w"][1] and abs(d[0]["w"][1] - (-(0.6 - 0.5) * (P["vfov"] or P["hfov"] * 240 / 320))) < 1e-9
     P.update(DEFAULTS)
     P["laser_period"] = 5.0                                 # laser patterns
     assert laser_pattern("flash", 0.1) and not laser_pattern("flash", 1.0) and laser_pattern("flash", 5.1)
