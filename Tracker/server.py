@@ -386,7 +386,7 @@ def detections_payload(tracks, tf, ref, latency, detector):
         sensor_pose=dict(pan_deg=round(float(ref[0]), 2), tilt_deg=round(float(ref[1]), 2))))
 
 
-def main(gimbal_ip, port, webhook=None, stream_url=None, device_url=None):
+def main(gimbal_ip, port, webhook=None, stream_url=None, device_url=None, host="127.0.0.1"):
     from flask import Flask, Response, jsonify, request, send_file
     import logging; logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
@@ -751,8 +751,8 @@ def main(gimbal_ip, port, webhook=None, stream_url=None, device_url=None):
                threading.Thread(target=laser_loop, daemon=True), threading.Thread(target=presence_loop, daemon=True),
                threading.Thread(target=push_loop, daemon=True)):
         th.start()
-    print(f"ANVYXO tracker: http://localhost:{port}  (gimbal {gimbal_ip})")
-    app.run(host="127.0.0.1", port=port, threaded=True)   # localhost only: it can move the gimbal
+    print(f"ANVYXO tracker: http://{host}:{port}  (gimbal {gimbal_ip})")
+    app.run(host=host, port=port, threaded=True)   # default localhost only: it can move the gimbal, no auth
 
 
 def selftest():
@@ -838,6 +838,8 @@ if __name__ == "__main__":
                     "http://127.0.0.1:8100/v1/perception/events?token=...  (enables its perception.detections)")
     ap.add_argument("--stream-url", help="read video here instead of the gimbal's :82 (e.g. the device service: "
                     "http://127.0.0.1:8100/v1/camera/stream?token=...), so both don't use up the gimbal's 2 stream slots")
+    ap.add_argument("--host", default="127.0.0.1", help="0.0.0.0 = reachable from the LAN (e.g. headless Jetson). "
+                    "NO login: anyone on the network can move the gimbal and fire the laser. Prefer an SSH tunnel.")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
-    selftest() if a.selftest else main(a.gimbal, a.port, a.webhook, a.stream_url, a.device_url)
+    selftest() if a.selftest else main(a.gimbal, a.port, a.webhook, a.stream_url, a.device_url, a.host)

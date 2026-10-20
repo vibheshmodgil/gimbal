@@ -26,7 +26,9 @@ Gimbal/
 ├── Firmware/
 │   ├── ANVYXO_Gimbal_Phase3/ ★ CURRENT firmware (camera + pan/tilt + laser + OLED, OTA) — see WIRING.md
 │   └── archive/              Phase1_OLED_only, Phase2_CAM_OLED_WebSocket (earlier test sketches)
-└── docs/
+├── Tracker/                  ★ person tracker + single control UI (python Tracker/server.py --gimbal <ip>)
+├── host/                     device service: Robotics Device API v1 for the gimbal (see host/README.md)
+└── docs/                     JETSON.md = run the tracker on a Jetson Orin Nano
     ├── guides/               assembly guides, fit-test guides, measure/check sheets (PNG)
     └── previews/             renders: front, back, exploded
 ```
