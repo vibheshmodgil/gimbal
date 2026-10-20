@@ -6,7 +6,7 @@ device service. The gimbal (ESP32) stays as it is, on the same Wi-Fi.
 ## 1. Get the code
 
 ```bash
-git clone https://github.com/<you>/anvyxo-gimbal.git ~/anvyxo-gimbal
+git clone https://github.com/vibheshmodgil/gimbal.git ~/anvyxo-gimbal
 cd ~/anvyxo-gimbal
 ```
 
